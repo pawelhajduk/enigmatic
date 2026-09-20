@@ -30,8 +30,8 @@ def serve(
     bind_port = port or cfg.listen_port
     cfg.listen_host = bind_host
     cfg.listen_port = bind_port
-    typer.echo(format_status(cfg))
     fastapi_app = create_app(cfg)
+    typer.echo(format_status(cfg))
     uvicorn.run(fastapi_app, host=bind_host, port=bind_port, log_level="warning")
 
 
