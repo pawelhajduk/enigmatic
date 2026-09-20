@@ -1,0 +1,118 @@
+listen_host: 127.0.0.1
+listen_port: 47821
+# Optional local gate. When set, inbound requests must send Authorization: Bearer <key>.
+api_key: null
+default_profile: openai
+# Optional path to a Presidio analyzer YAML. When null, Enigmatic's bundled defaults are used.
+analyzer_conf: null
+score_threshold: 0.5
+language: en
+
+http:
+  openai:
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+  azure:
+    type: openai
+    base_url: https://YOUR_RESOURCE.openai.azure.com/openai/v1
+    api_key_env: AZURE_OPENAI_API_KEY
+    auth_header: api-key
+  anthropic:
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    api_version: "2023-06-01"
+  openrouter:
+    type: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+  groq:
+    type: openai
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY
+  together:
+    type: openai
+    base_url: https://api.together.xyz/v1
+    api_key_env: TOGETHER_API_KEY
+  fireworks:
+    type: openai
+    base_url: https://api.fireworks.ai/inference/v1
+    api_key_env: FIREWORKS_API_KEY
+  deepseek:
+    type: openai
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+  mistral:
+    type: openai
+    base_url: https://api.mistral.ai/v1
+    api_key_env: MISTRAL_API_KEY
+  google:
+    type: openai
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GOOGLE_API_KEY
+  ollama:
+    type: openai
+    base_url: http://127.0.0.1:11434/v1
+    api_key_env: OLLAMA_API_KEY
+  lmstudio:
+    type: openai
+    base_url: http://127.0.0.1:1234/v1
+    api_key_env: LMSTUDIO_API_KEY
+  vllm:
+    type: openai
+    base_url: http://127.0.0.1:8000/v1
+    api_key_env: VLLM_API_KEY
+
+acp:
+  copilot:
+    command: copilot
+    args: ["--acp", "--stdio"]
+    deny_tools: ["shell", "write", "read", "url", "memory"]
+  gemini:
+    command: gemini
+    args: ["--acp"]
+  kimi:
+    command: kimi
+    args: ["acp"]
+  hermes:
+    command: hermes
+    args: ["acp"]
+  kiro:
+    command: kiro-cli
+    args: ["acp"]
+  qoder:
+    command: qodercli
+    args: ["--acp"]
+  trae:
+    command: traecli
+    args: ["acp", "serve"]
+  qwenpaw:
+    command: qwenpaw
+    args: ["acp"]
+  grok:
+    command: grok
+    args: ["agent", "stdio"]
+
+jsonl:
+  copilot:
+    command: copilot
+    prompt_flag: "-p"
+    extra_args:
+      - "-s"
+      - "--no-ask-user"
+      - "--output-format"
+      - "json"
+      - "--deny-tool=shell"
+      - "--deny-tool=write"
+      - "--deny-tool=read"
+      - "--deny-tool=url"
+      - "--deny-tool=memory"
+  claude:
+    command: claude
+    prompt_flag: "-p"
+    extra_args:
+      - "--output-format"
+      - "stream-json"
+      - "--permission-mode"
+      - "dontAsk"

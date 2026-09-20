@@ -1,0 +1,21 @@
+# Enigmatic default Presidio entity allowlist.
+# PERSON / LOCATION (spaCy NER) are off. Enable them here if you want names redacted.
+enabled_entities:
+  - EMAIL_ADDRESS
+  - PHONE_NUMBER
+  - CREDIT_CARD
+  - IBAN_CODE
+  - IP_ADDRESS
+  - US_SSN
+  - US_BANK_NUMBER
+  - US_ITIN
+  - US_PASSPORT
+  - US_DRIVER_LICENSE
+  - CRYPTO
+  - MEDICAL_LICENSE
+  - URL
+  - GITHUB_TOKEN
+  - OPENAI_KEY
+  - AWS_ACCESS_KEY
+  - AWS_SECRET_KEY
+  - PEM_KEY
