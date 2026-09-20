@@ -37,14 +37,14 @@ Copy `conf/providers.yaml` and set the matching `*_API_KEY` environment variable
 uv run enigmatic serve
 ```
 
-Listens on `127.0.0.1:47821` by default. Override with `--host` / `--port` / `--config`.
+Listens on `127.0.0.1:47821` by default. Override with `--host` / `--port` / `--config`. On start, the proxy prints listener, pipeline, HTTP profiles, and agent CLIs to the terminal (same dump as `status`). There is no web status page; `/health` remains a JSON liveness check for scripts.
 
 ```bash
 uv run enigmatic doctor
 uv run enigmatic status
 ```
 
-`doctor` checks spaCy, Tesseract, HTTP profiles, and whether `copilot` (and other CLIs) are on PATH. It never prints prompt text or API keys.
+`status` and `doctor` print the same diagnostics. `doctor` exits 1 if spaCy is missing. Neither command prints prompt text or API keys.
 
 ## Point a client at Enigmatic
 

@@ -33,14 +33,14 @@ def _app(http_url: str) -> TestClient:
     return TestClient(create_app(cfg, pipeline=FakePipeline()))  # type: ignore[arg-type]
 
 
-def test_health_and_status_and_501() -> None:
+def test_health_and_root_and_501() -> None:
     client = _app("https://example.invalid/v1")
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["ok"] is True
-    page = client.get("/")
-    assert page.status_code == 200
-    assert "Enigmatic" in page.text
+    root = client.get("/")
+    assert root.status_code == 404
+    assert "<html" not in root.text.lower()
     forbidden = client.post("/v1/images/generations", json={"prompt": "nope"})
     assert forbidden.status_code == 501
 

@@ -10,14 +10,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from enigmatic import __version__
 from enigmatic.config import EnigmaticConfig, load_config
 from enigmatic.openai_walk import walk
-from enigmatic.presidio_ops.images import tesseract_status
 from enigmatic.presidio_ops.mapping import STORE, SessionMapping
-from enigmatic.presidio_ops.pipeline import Pipeline, build_pipeline, spacy_status
+from enigmatic.presidio_ops.pipeline import Pipeline, build_pipeline
 from enigmatic.protocols.packing import pack_anthropic, pack_openai_chat, pack_responses
 from enigmatic.protocols.sse import (
     anthropic_stream_from_text,
@@ -34,7 +33,6 @@ from enigmatic.protocols.translate import (
     responses_input_to_messages,
     responses_output_from_text,
 )
-from enigmatic.providers.acp import command_on_path as acp_on_path
 from enigmatic.providers.acp import run_acp_prompt
 from enigmatic.providers.http import (
     HttpProvider,
@@ -43,7 +41,6 @@ from enigmatic.providers.http import (
     translate_and_restore_anthropic_to_openai,
     translate_and_restore_openai_to_anthropic,
 )
-from enigmatic.providers.jsonl import command_on_path as jsonl_on_path
 from enigmatic.providers.jsonl import run_jsonl_prompt
 from enigmatic.providers.router import Route, Router
 
@@ -60,68 +57,6 @@ NOT_IMPLEMENTED = (
     "/v1/batches",
     "/v1/fine-tuning/jobs",
 )
-
-STATUS_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Enigmatic</title>
-  <style>
-    :root {{ color-scheme: light dark; }}
-    body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; background: #0f1419; color: #e7ecf3; }}
-    main {{ max-width: 760px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }}
-    h1 {{ font-size: 1.75rem; font-weight: 650; margin: 0 0 0.35rem; }}
-    .lede {{ color: #9aa8b8; margin: 0 0 2rem; line-height: 1.5; }}
-    section {{ background: #171e26; border: 1px solid #243040; border-radius: 12px; padding: 1.1rem 1.2rem; margin-bottom: 1rem; }}
-    h2 {{ font-size: 0.82rem; letter-spacing: 0.04em; text-transform: uppercase; color: #7d8b9a; margin: 0 0 0.75rem; }}
-    dl {{ margin: 0; display: grid; grid-template-columns: 11rem 1fr; gap: 0.4rem 1rem; font-size: 0.95rem; }}
-    dt {{ color: #9aa8b8; }}
-    dd {{ margin: 0; font-variant-numeric: tabular-nums; }}
-    .ok {{ color: #6ee7b7; }}
-    .bad {{ color: #fca5a5; }}
-    code {{ font-family: ui-monospace, SFMono-Regular, menlo, monospace; font-size: 0.88em; }}
-    ul {{ margin: 0; padding-left: 1.1rem; line-height: 1.55; }}
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Enigmatic</h1>
-    <p class="lede">Local anonymizing proxy. Clients send OpenAI or Anthropic HTTP here; Presidio replaces PII with stable placeholders before the upstream LLM or agent CLI sees the prompt, then restores them on the way back.</p>
-    <section>
-      <h2>Listener</h2>
-      <dl>
-        <dt>Bind</dt><dd><code>{host}:{port}</code></dd>
-        <dt>Version</dt><dd>{version}</dd>
-        <dt>Default profile</dt><dd><code>{default_profile}</code></dd>
-        <dt>Auth gate</dt><dd>{auth}</dd>
-      </dl>
-    </section>
-    <section>
-      <h2>Pipeline</h2>
-      <dl>
-        <dt>spaCy</dt><dd class="{spacy_cls}">{spacy}</dd>
-        <dt>Tesseract</dt><dd class="{tess_cls}">{tesseract}</dd>
-        <dt>Entities</dt><dd>{entities}</dd>
-      </dl>
-    </section>
-    <section>
-      <h2>HTTP profiles</h2>
-      <ul>{http_profiles}</ul>
-    </section>
-    <section>
-      <h2>Agent CLIs</h2>
-      <ul>{cli_profiles}</ul>
-    </section>
-    <section>
-      <h2>Point a client here</h2>
-      <p>Set <code>base_url</code> to <code>http://{host}:{port}/v1</code> for OpenAI SDKs, OpenCode, Cline, or Codex. Anthropic SDKs use the same host with <code>/v1/messages</code>. Model prefixes select a profile, for example <code>openai/gpt-4o</code>, <code>anthropic/claude-sonnet-4-5</code>, or <code>copilot/gpt-5</code>.</p>
-    </section>
-  </main>
-</body>
-</html>
-"""
-
 
 def session_id_from_request(request: Request) -> str:
     header = request.headers.get("x-enigmatic-session")
@@ -161,6 +96,7 @@ def create_app(
         version=__version__,
         docs_url=None,
         redoc_url=None,
+        openapi_url=None,
         lifespan=lifespan,
     )
 
@@ -183,36 +119,6 @@ def create_app(
         if not isinstance(walked, dict):
             raise TypeError("payload must be an object")
         return walked
-
-    @app.get("/", response_class=HTMLResponse)
-    async def status_page() -> str:
-        spacy = spacy_status()
-        tess = tesseract_status()
-        http_items = "".join(
-            f"<li><code>{name}</code> — {profile.type} — <code>{profile.base_url}</code></li>"
-            for name, profile in cfg.http.items()
-        )
-        cli_items = []
-        for name, profile in cfg.acp.items():
-            present = "on PATH" if acp_on_path(profile.command) else "not installed"
-            cli_items.append(f"<li><code>{name}</code> ACP <code>{profile.command}</code> ({present})</li>")
-        for name, profile in cfg.jsonl.items():
-            present = "on PATH" if jsonl_on_path(profile.command) else "not installed"
-            cli_items.append(f"<li><code>{name}</code> JSONL <code>{profile.command}</code> ({present})</li>")
-        return STATUS_HTML.format(
-            host=cfg.listen_host,
-            port=cfg.listen_port,
-            version=__version__,
-            default_profile=cfg.default_profile,
-            auth="enabled" if cfg.api_key else "off",
-            spacy="en_core_web_sm ready" if spacy.get("ok") else "en_core_web_sm missing",
-            spacy_cls="ok" if spacy.get("ok") else "bad",
-            tesseract=tess.get("path") or "missing (vision fail-closed)",
-            tess_cls="ok" if tess.get("ok") else "bad",
-            entities=", ".join(cfg.enabled_entities or pipeline.entities),
-            http_profiles=http_items or "<li>none</li>",
-            cli_profiles="".join(cli_items) or "<li>none</li>",
-        )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
