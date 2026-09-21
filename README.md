@@ -46,6 +46,16 @@ uv run enigmatic status
 
 `status` and `doctor` print the same diagnostics. `doctor` exits 1 if spaCy is missing. Neither command prints prompt text or API keys.
 
+Preview what the proxy would send upstream without calling an LLM:
+
+```bash
+uv run enigmatic dry-run "email me at ada@example.com"
+uv run enigmatic dry-run --file prompt.txt
+uv run enigmatic dry-run --json '{"model":"openai/gpt-4o","messages":[{"role":"user","content":"hi ada@example.com"}]}'
+```
+
+The command prints the original text, the anonymized text, and the placeholder map.
+
 ## Point a client at Enigmatic
 
 OpenAI Python SDK:
