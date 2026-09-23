@@ -648,7 +648,9 @@ def create_app(
         if gate:
             return gate
         body = await read_body(request)
-        mapping, key = session_for(request, body, persistent=True)
+        # Only responses the upstream keeps can be chained with previous_response_id.
+        chainable = body.get("store") is not False or bool(body.get("background"))
+        mapping, key = session_for(request, body, persistent=chainable)
         anon = await anonymize_async(body, mapping)
         route = resolve(str(anon.get("model") or ""), "openai")
         want_stream = bool(anon.get("stream"))
@@ -705,7 +707,7 @@ def create_app(
         if gate:
             return gate
         body = await read_body(request)
-        mapping, key = session_for(request, body, persistent=True)
+        mapping, _key = session_for(request, body)
         anon = await anonymize_async(body, mapping)
         route = resolve(str(anon.get("model") or ""), "openai")
         require_openai_http(route, feature)
@@ -714,7 +716,7 @@ def create_app(
         response = await http_for(route).request(
             "POST", path, outbound, stream=False, extra_headers=upstream_headers(request, route)
         )
-        return await relay(response, mapping, False, "responses", binder(request, key, route.profile_id))
+        return await relay(response, mapping, False, "responses")
 
     @api_route("/responses/compact", ["POST"])
     async def responses_compact(request: Request) -> Response:
