@@ -8,13 +8,27 @@ It is not encryption. Placeholders keep entity type visible to the model so it c
 
 ## What talks to what
 
-**Inbound:** OpenAI-compatible HTTP (`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/completions`, `/v1/models`) and Anthropic Messages (`/v1/messages`).
+**Inbound:** OpenAI-compatible HTTP and Anthropic Messages (`/v1/messages`). Every route is also served without the `/v1` prefix for clients whose base URL omits it.
+
+| OpenAI endpoint | Notes |
+| --- | --- |
+| `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings` | Streaming, tool calls, `stream_options.include_usage` |
+| `POST /v1/responses` | Streaming, function and custom tools (Codex `apply_patch`), reasoning items, `previous_response_id`, background mode |
+| `POST /v1/responses/compact`, `POST /v1/responses/input_tokens` | OpenAI-compatible upstreams only |
+| `GET`/`DELETE /v1/responses/{id}`, `POST /v1/responses/{id}/cancel`, `GET /v1/responses/{id}/input_items` | Routed to the profile that created the response |
+| `GET /v1/models`, `GET /v1/models/{model}` | |
+
+Responses sent to an Anthropic upstream are translated through Chat Completions and streamed back as the full Responses event sequence. That path cannot use `previous_response_id`; clients must resend the full input (Codex does this with `store: false`).
+
+Encrypted reasoning and compaction content, call ids, tool names, enums, custom tool grammars, and non-image data URLs (`file_data`, audio) are forwarded untouched. Tool-call arguments are scanned as decoded JSON values, and restored originals are JSON-escaped so arguments always parse.
+
+Client headers `OpenAI-Beta`, `OpenAI-Organization`, `OpenAI-Project`, `Idempotency-Key`, `X-Client-Request-Id`, `session_id`, `conversation_id`, `originator`, and `anthropic-beta` are forwarded. Upstream `retry-after`, `x-request-id`, and rate-limit headers are returned to the client. Errors use OpenAI's `{"error": {"message", "type", "param", "code"}}` shape (Anthropic's shape on `/messages`), and a stream that fails mid-way ends with an SSE error event.
 
 **Outbound HTTP:** one generic OpenAI-compatible client plus native Anthropic. Named profiles cover OpenAI, Azure, Groq, OpenRouter, Together, Fireworks, DeepSeek, Mistral, Google’s OpenAI-compat endpoint, Ollama, LM Studio, and vLLM. Unknown JSON keys are preserved.
 
 **Outbound agent CLIs:** a shared [ACP](https://agentclientprotocol.com/) client (JSON-RPC over stdio) plus prompt-mode JSONL. Copilot uses `copilot --acp --stdio` with a `copilot -p --output-format json` fallback. Other ACP binaries (Gemini, Kimi, Hermes, Kiro, Qoder, Trae, QwenPaw, Grok) are registry rows in `conf/providers.yaml`. Enigmatic denies CLI tools so a chat completion cannot write your disk. VS Code Copilot and Copilot CLI are **not** Enigmatic clients; do not set `COPILOT_PROVIDER_BASE_URL` to this proxy.
 
-Audio, image generation, files, batches, and fine-tuning return **501**. Embeddings on agent-CLI upstreams also return 501. Vision data URLs are OCR-redacted when Tesseract is installed; otherwise the image is dropped (fail-closed).
+Audio, image generation, files, batches, fine-tuning, and conversations return **501**. Embeddings on agent-CLI upstreams also return 501. Vision data URLs are OCR-redacted when Tesseract is installed. Otherwise the image part is replaced with a text part saying it was omitted (fail-closed). Remote image URLs are forwarded as-is.
 
 ## Install
 
@@ -76,7 +90,7 @@ Anthropic: same host, model `anthropic/claude-sonnet-4-5`, path `/v1/messages`.
 
 OpenCode / Cline / Codex: set the provider `base_url` to `http://127.0.0.1:47821/v1`. Model prefixes select a profile (`openai/…`, `groq/…`, `anthropic/…`, `copilot/…`).
 
-Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns. The header is a capability for that vault: with the gate on it is namespaced by the bearer token, and with the gate off a missing header does not share a global map. Sessions expire after an hour and the process keeps a bounded number of them.
+Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns. The header is a capability for that vault: with the gate on it is namespaced by the bearer token, and with the gate off a missing header does not share a global map. When that header is absent, a client `session_id` / `conversation_id` header or the request's `prompt_cache_key` serves the same role. Every `/v1/responses` call gets a stored vault, and a later `previous_response_id` that points at it reuses it, so placeholders in upstream-stored history still restore. Sessions expire after an hour and the process keeps a bounded number of them.
 
 ## Access token
 
@@ -111,7 +125,7 @@ copilot   # complete login in the CLI
 
 Then call Enigmatic with `model: "copilot/gpt-5"` (or another model the CLI accepts). Enigmatic packs the anonymized transcript into ACP or `copilot -p -` (the prompt is written to the CLI's stdin, not its argv). Agent profiles that cannot deny tools are rejected. ACP sessions start in an empty temp directory and at most two agent CLIs run at once. There is no `enigmatic login copilot`.
 
-Request bodies are capped at 8 MiB. Vision data URLs over 5 MiB are dropped. Presidio runs off the request event loop, and repeated strings in a session are analyzed once. Names and locations stay off unless you add `PERSON` or `LOCATION` to `enabled_entities`.
+Request bodies are capped at 32 MiB (`max_body_bytes` in `conf/providers.yaml`). Upstream reads time out after 600 s without data, matching the OpenAI SDK; set `read_timeout` on an HTTP profile to change it. Vision data URLs over 5 MiB are dropped. Presidio runs off the request event loop, and repeated strings in a session are analyzed once. Names and locations stay off unless you add `PERSON` or `LOCATION` to `enabled_entities`.
 
 ## Tests
 
