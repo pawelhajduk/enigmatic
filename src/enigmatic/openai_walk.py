@@ -96,11 +96,21 @@ def _is_schema_path(path: tuple[str, ...]) -> bool:
     return False
 
 
+def _part_type(value: dict[str, Any]) -> str | None:
+    """The `type` discriminator of a content part or item.
+
+    JSON schemas also use `type` (and may have a property named `type` whose
+    value is an object), so anything that is not a string is not a discriminator.
+    """
+    kind = value.get("type")
+    return kind if isinstance(kind, str) else None
+
+
 def _skip_key(key: str, parent: dict[str, Any], path: tuple[str, ...]) -> bool:
     """Keys whose whole value passes through untouched."""
     if key in SKIP_KEY_NAMES:
         return True
-    if key == "name" and (parent.get("type") in TOOL_ITEM_TYPES or TOOL_CONTEXT_KEYS.intersection(path)):
+    if key == "name" and (_part_type(parent) in TOOL_ITEM_TYPES or TOOL_CONTEXT_KEYS.intersection(path)):
         return True
     # Custom tool grammars (Codex apply_patch) are structure, not prose.
     if key == "format" and "tools" in path:
@@ -168,7 +178,7 @@ class _Walker:
         return value
 
     def mapping(self, value: dict[str, Any], path: tuple[str, ...]) -> JSONValue:
-        kind = value.get("type")
+        kind = _part_type(value)
         if kind in IMAGE_PART_TYPES:
             return self.image_part(value, str(kind))
         if kind == "image" and isinstance(value.get("source"), dict):
@@ -177,8 +187,11 @@ class _Walker:
         for key, item in value.items():
             if _skip_key(key, value, path):
                 out[key] = item
-                continue
-            out[key] = self.value(item, path + (key,))
+            elif kind == "tool_use" and key == "input":
+                # Anthropic's decoded counterpart of OpenAI `arguments`.
+                out[key] = self.data(item)
+            else:
+                out[key] = self.value(item, path + (key,))
         return out
 
     def image_part(self, part: dict[str, Any], kind: str) -> dict[str, Any]:

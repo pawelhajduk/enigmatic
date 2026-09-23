@@ -229,6 +229,20 @@ def test_previous_response_id_reuses_the_vault(upstream: Upstream) -> None:
     assert ("include[]", "reasoning.encrypted_content") in upstream.calls[-1]["query"]
 
 
+def test_store_false_responses_do_not_allocate_stored_vaults(upstream: Upstream) -> None:
+    from enigmatic.presidio_ops.mapping import STORE
+
+    client = _client()
+    before = len(STORE._sessions)  # noqa: SLF001
+    for _ in range(3):
+        upstream.replies.append(FakeResponse(body={"id": "resp_x", "object": "response", "output": []}))
+        client.post("/v1/responses", json={"model": "gpt-5", "store": False, "input": "hi"})
+    assert len(STORE._sessions) == before  # noqa: SLF001
+    upstream.replies.append(FakeResponse(body={"id": "resp_kept", "object": "response", "output": []}))
+    client.post("/v1/responses", json={"model": "gpt-5", "input": "hi"})
+    assert STORE.lookup_response("open", "resp_kept") is not None
+
+
 def test_compact_and_input_tokens_pass_through(upstream: Upstream) -> None:
     upstream.replies.append(
         FakeResponse(body={"id": "cmp_1", "object": "response.compaction", "output": [{"type": "compaction", "encrypted_content": "gAAA"}], "usage": {}})

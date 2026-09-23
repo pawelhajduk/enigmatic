@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import shutil
+import tempfile
 from typing import Any
 
 from enigmatic.config import JsonlProfile
@@ -14,6 +15,7 @@ logger = logging.getLogger("enigmatic.jsonl")
 
 AGENT_TIMEOUT_SECONDS = 120.0
 _DENY_MARKERS = ("--deny-tool", "--disallowedtools", "--disallowed-tools", "dontask")
+CODEX_SHELL_FEATURES = frozenset({"shell_tool", "unified_exec"})
 
 
 class JsonlError(RuntimeError):
@@ -24,10 +26,32 @@ def command_on_path(command: str) -> bool:
     return shutil.which(command) is not None
 
 
+def _codex_disabled_features(args: list[str]) -> set[str]:
+    """Features turned off via `--disable X`, `--disable=X`, or `-c features.X=false`."""
+    disabled: set[str] = set()
+    for index, arg in enumerate(args):
+        value = arg
+        if arg in {"--disable", "-c", "--config"} and index + 1 < len(args):
+            value = f"{arg}={args[index + 1]}"
+        if value.startswith("--disable="):
+            disabled.add(value.split("=", 1)[1].strip().lower())
+        elif value.startswith(("-c=", "--config=")):
+            setting = value.split("=", 1)[1].replace(" ", "").lower()
+            if setting.startswith("features.") and setting.endswith("=false"):
+                disabled.add(setting[len("features.") : -len("=false")])
+    return disabled
+
+
 def jsonl_denies_tools(profile: JsonlProfile) -> bool:
     """True when the CLI args tell the agent to refuse tool use."""
     blob = " ".join(profile.extra_args).lower()
-    return any(marker in blob for marker in _DENY_MARKERS)
+    if any(marker in blob for marker in _DENY_MARKERS):
+        return True
+    # Codex exec: a read-only sandbox still lets the model run read-only shell
+    # commands, which could send unanonymized local files upstream. Both shell
+    # tools must be off as well.
+    read_only = "--sandbox" in blob and "read-only" in blob
+    return read_only and CODEX_SHELL_FEATURES <= _codex_disabled_features(profile.extra_args)
 
 
 def parse_copilot_jsonl(line: str) -> str | None:
@@ -51,6 +75,33 @@ def parse_copilot_jsonl(line: str) -> str | None:
     delta = data.get("delta") if isinstance(data, dict) else None
     if isinstance(delta, str) and "assistant" in kind:
         return delta
+    return None
+
+
+def parse_codex_jsonl(line: str) -> str | None:
+    """Extract assistant text from a `codex exec --json` event."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(event, dict):
+        return None
+    item = event.get("item")
+    if isinstance(item, dict) and item.get("type") in {"agent_message", "message"}:
+        text = item.get("text")
+        if isinstance(text, str):
+            return text
+    if event.get("type") in {"agent_message", "message"} and isinstance(event.get("text"), str):
+        return event["text"]
+    content = event.get("content")
+    if isinstance(content, list):
+        parts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        ]
+        if parts:
+            return "".join(parts)
     return None
 
 
@@ -78,36 +129,72 @@ def parse_claude_jsonl(line: str) -> str | None:
     return None
 
 
+def build_jsonl_argv(profile: JsonlProfile, prompt: str, model: str | None) -> list[str]:
+    """Argv for an existing CLI. `prompt` is passed on stdin, never as an argument."""
+    del prompt
+    args = list(profile.extra_args)
+    if model and profile.model_flag:
+        if args and args[-1] == "-":
+            args = [*args[:-1], profile.model_flag, model, "-"]
+        else:
+            args.extend([profile.model_flag, model])
+    argv = [profile.command, *args]
+    if profile.prompt_flag:
+        argv.append(profile.prompt_flag)
+    if argv[-1] != "-":
+        argv.append("-")
+    return argv
+
+
+def _parse_jsonl_line(parser: str, line: str) -> str | None:
+    if parser == "copilot":
+        return parse_copilot_jsonl(line)
+    if parser == "claude":
+        return parse_claude_jsonl(line)
+    if parser == "codex":
+        return parse_codex_jsonl(line)
+    if parser == "text":
+        return line
+    raise JsonlError(f"Unknown JSONL parser {parser}")
+
+
 async def run_jsonl_prompt(
     profile: JsonlProfile,
     prompt: str,
     model: str | None = None,
-    parser: str = "copilot",
+    parser: str | None = None,
 ) -> str:
     if not command_on_path(profile.command):
-        raise JsonlError(f"{profile.command} is not on PATH")
+        raise JsonlError(
+            f"{profile.command} is not on PATH. Install that coding-agent CLI and log in; "
+            "Enigmatic only forwards the anonymized prompt to it."
+        )
     if not jsonl_denies_tools(profile):
         raise JsonlError(f"{profile.command} does not deny tools")
+    chosen = parser or profile.parser
+    usable_model = model if model and model != "default" else None
     # `-` means "read the prompt from stdin" so the text is not visible in process listings.
-    argv = [profile.command, *profile.extra_args, profile.prompt_flag, "-"]
-    if model:
-        argv.extend(["--model", model])
+    argv = build_jsonl_argv(profile, prompt, usable_model)
     logger.info("jsonl spawn %s", profile.command)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(prompt.encode("utf-8")),
-            timeout=AGENT_TIMEOUT_SECONDS,
+    # Same isolation as ACP: the agent starts in an empty directory, not the
+    # project the proxy was launched from.
+    with tempfile.TemporaryDirectory(prefix="enigmatic-agent-") as workdir:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workdir,
         )
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise JsonlError(f"{profile.command} timed out") from None
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode("utf-8")),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise JsonlError(f"{profile.command} timed out") from None
     if proc.returncode not in (0, None) and not stdout:
         err = stderr.decode("utf-8", errors="replace")
         raise JsonlError(err.strip() or f"{profile.command} exited {proc.returncode}")
@@ -117,7 +204,7 @@ async def run_jsonl_prompt(
         line = raw_line.strip()
         if not line:
             continue
-        piece = parse_claude_jsonl(line) if parser == "claude" else parse_copilot_jsonl(line)
+        piece = _parse_jsonl_line(chosen, line)
         if piece:
             last_complete = piece
             texts.append(piece)

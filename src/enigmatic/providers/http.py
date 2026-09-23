@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import os
@@ -176,8 +177,10 @@ class HttpProvider:
 
 async def iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     buffer = ""
+    # Network chunks can split a multi-byte UTF-8 character.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     async for raw in response.aiter_bytes():
-        buffer += raw.decode("utf-8", errors="replace")
+        buffer += decoder.decode(raw)
         if len(buffer) > MAX_SSE_LINE_BYTES and "\n" not in buffer:
             raise HttpProviderError(502, b"upstream SSE line too large", {})
         while "\n" in buffer:
@@ -185,6 +188,7 @@ async def iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
             if len(line) > MAX_SSE_LINE_BYTES:
                 raise HttpProviderError(502, b"upstream SSE line too large", {})
             yield line
+    buffer += decoder.decode(b"", final=True)
     if len(buffer) > MAX_SSE_LINE_BYTES:
         raise HttpProviderError(502, b"upstream SSE line too large", {})
     if buffer:

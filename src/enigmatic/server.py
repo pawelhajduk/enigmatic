@@ -53,7 +53,6 @@ from enigmatic.protocols.translate import (
     responses_output_from_text,
     strip_model_prefix,
 )
-from enigmatic.providers.acp import run_acp_prompt
 from enigmatic.providers.http import (
     HttpProvider,
     HttpProviderError,
@@ -64,7 +63,7 @@ from enigmatic.providers.http import (
     translate_and_restore_anthropic_to_openai,
     translate_and_restore_openai_to_anthropic,
 )
-from enigmatic.providers.jsonl import jsonl_denies_tools, run_jsonl_prompt
+from enigmatic.providers.invoke import invoke_agent
 from enigmatic.providers.router import Route, RouteError, Router
 
 logger = logging.getLogger("enigmatic.server")
@@ -545,26 +544,10 @@ def create_app(
         except TimeoutError as exc:
             raise AgentBusy("Too many agent CLI requests") from exc
         try:
-            return await _run_agent_unlocked(route, prompt, mapping)
+            text = await invoke_agent(route, prompt)
+            return mapping.restore_complete(text)
         finally:
             agent_gate.release()
-
-    async def _run_agent_unlocked(route: Route, prompt: str, mapping: SessionMapping) -> str:
-        if route.kind == "acp" and route.acp is not None:
-            try:
-                text = await run_acp_prompt(route.acp, prompt, model=route.model or None)
-                return mapping.restore_complete(text)
-            except Exception as exc:
-                logger.info("ACP failed, JSONL fallback: %s", exc)
-                if route.jsonl is None:
-                    raise
-        if route.jsonl is None:
-            raise RuntimeError(f"No JSONL profile for {route.profile_id}")
-        if not jsonl_denies_tools(route.jsonl):
-            raise RouteError(f"Agent profile {route.profile_id} does not deny tools")
-        parser = "claude" if route.profile_id == "claude" else "copilot"
-        text = await run_jsonl_prompt(route.jsonl, prompt, model=route.model or None, parser=parser)
-        return mapping.restore_complete(text)
 
     @api_route("/chat/completions", ["POST"])
     async def chat_completions(request: Request) -> Response:
@@ -648,7 +631,9 @@ def create_app(
         if gate:
             return gate
         body = await read_body(request)
-        mapping, key = session_for(request, body, persistent=True)
+        # Only responses the upstream keeps can be chained with previous_response_id.
+        chainable = body.get("store") is not False or bool(body.get("background"))
+        mapping, key = session_for(request, body, persistent=chainable)
         anon = await anonymize_async(body, mapping)
         route = resolve(str(anon.get("model") or ""), "openai")
         want_stream = bool(anon.get("stream"))
@@ -705,7 +690,7 @@ def create_app(
         if gate:
             return gate
         body = await read_body(request)
-        mapping, key = session_for(request, body, persistent=True)
+        mapping, _key = session_for(request, body)
         anon = await anonymize_async(body, mapping)
         route = resolve(str(anon.get("model") or ""), "openai")
         require_openai_http(route, feature)
@@ -714,7 +699,7 @@ def create_app(
         response = await http_for(route).request(
             "POST", path, outbound, stream=False, extra_headers=upstream_headers(request, route)
         )
-        return await relay(response, mapping, False, "responses", binder(request, key, route.profile_id))
+        return await relay(response, mapping, False, "responses")
 
     @api_route("/responses/compact", ["POST"])
     async def responses_compact(request: Request) -> Response:

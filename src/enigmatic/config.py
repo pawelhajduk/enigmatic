@@ -28,15 +28,27 @@ class HttpProfile(BaseModel):
 
 
 class AcpProfile(BaseModel):
+    """Spawn an existing ACP agent (`agent acp`, `copilot --acp`)."""
+
     command: str
     args: list[str] = Field(default_factory=list)
     deny_tools: list[str] = Field(default_factory=list)
+    # Per-tool flag templates (`{tool}` is replaced). None uses the Copilot-style
+    # defaults; [] for CLIs that reject unknown flags, such as Cursor's `agent`.
+    deny_flags: list[str] | None = None
+    # Uses the CLI's own login (for example cursor_login). Not an API key.
+    auth_method: str | None = None
 
 
 class JsonlProfile(BaseModel):
+    """One-shot prompt mode of an existing CLI (`claude -p`, `codex exec`)."""
+
     command: str
     prompt_flag: str = "-p"
     extra_args: list[str] = Field(default_factory=list)
+    parser: str = "copilot"
+    prompt_stdin: bool = False
+    model_flag: str | None = "--model"
 
 
 class EnigmaticConfig(BaseModel):

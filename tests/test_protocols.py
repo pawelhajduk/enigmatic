@@ -107,6 +107,30 @@ def test_responses_from_chat_completion_restores_custom_tool_calls() -> None:
     assert out["usage"]["total_tokens"] == 5
 
 
+def test_responses_tool_choice_objects_map_or_drop_without_crashing() -> None:
+    tools = [{"type": "custom", "name": "apply_patch"}, {"type": "function", "name": "shell"}]
+    custom = responses_input_to_messages({"input": "x", "tools": tools, "tool_choice": {"type": "custom", "name": "apply_patch"}})
+    assert custom["tool_choice"] == {"type": "function", "function": {"name": "apply_patch"}}
+    allowed = responses_input_to_messages(
+        {"input": "x", "tools": tools, "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": []}}
+    )
+    assert "tool_choice" not in allowed
+
+
+def test_responses_stream_output_follows_output_index() -> None:
+    from enigmatic.protocols.sse import ResponsesStreamBuilder
+
+    builder = ResponsesStreamBuilder("m")
+    builder.feed({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "a", "arguments": "{}"}}]}}]})
+    builder.feed({"choices": [{"index": 0, "delta": {"content": "after the call"}}]})
+    builder.feed({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+    events = builder.finish()
+    output = events[-1][1]["response"]["output"]
+    assert [item["type"] for item in output] == ["function_call", "message"]
+    added = [payload for _event, payload in events if payload["type"] == "response.output_item.done"]
+    assert {payload["item"]["type"]: payload["output_index"] for payload in added} == {"message": 1, "function_call": 0}
+
+
 def test_pack_openai_chat_includes_roles() -> None:
     text = pack_openai_chat(
         {

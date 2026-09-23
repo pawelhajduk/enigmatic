@@ -19,6 +19,7 @@ Event = tuple[str | None, Any]
 BufferKey = tuple[Any, ...]
 
 CHAT_TEXT_FIELDS = ("content", "refusal", "reasoning_content", "reasoning")
+LEGACY_TEXT = "legacy_text"
 CHAT_META_KEYS = ("id", "object", "created", "model", "system_fingerprint", "service_tier")
 RESPONSES_KEY_FIELDS = ("item_id", "output_index", "content_index", "summary_index")
 RESPONSES_OPAQUE_DELTAS = frozenset({"response.audio.delta"})
@@ -83,11 +84,11 @@ class SseRestorer:
             delta = choice.get("delta")
             if isinstance(delta, dict):
                 self._chat_delta(index, delta)
+            if isinstance(choice.get("text"), str):
+                # Legacy /v1/completions chunks carry text on the choice itself.
+                choice["text"] = self._buffer(("chat", index, LEGACY_TEXT)).feed(choice["text"])
             if choice.get("finish_reason") is not None:
-                if not isinstance(delta, dict):
-                    delta = {}
-                    choice["delta"] = delta
-                self._chat_flush_choice(index, delta)
+                self._chat_flush_choice(index, choice)
         return [(event, payload)]
 
     def _chat_delta(self, index: Any, delta: dict[str, Any]) -> None:
@@ -111,28 +112,20 @@ class SseRestorer:
         if isinstance(fn.get("arguments"), str):
             fn["arguments"] = self._buffer(key, escape_json=True).feed(fn["arguments"])
 
-    def _chat_flush_choice(self, index: Any, delta: dict[str, Any]) -> None:
+    def _chat_flush_choice(self, index: Any, choice: dict[str, Any]) -> None:
         for key in [key for key in self._buffers if key[1] == index]:
             leftover = self._pop_leftover(key)
             if leftover:
-                _merge_chat_leftover(delta, key, leftover)
+                _merge_chat_leftover(choice, key, leftover)
 
     def _chat_finish(self) -> list[Event]:
-        deltas: dict[Any, dict[str, Any]] = {}
+        choices: dict[Any, dict[str, Any]] = {}
         for key in list(self._buffers):
             leftover = self._pop_leftover(key)
             if leftover:
-                _merge_chat_leftover(deltas.setdefault(key[1], {}), key, leftover)
-        return [
-            (
-                None,
-                {
-                    **self._chat_meta,
-                    "choices": [{"index": index, "delta": delta, "finish_reason": None}],
-                },
-            )
-            for index, delta in deltas.items()
-        ]
+                choice = choices.setdefault(key[1], {"index": key[1], "finish_reason": None})
+                _merge_chat_leftover(choice, key, leftover)
+        return [(None, {**self._chat_meta, "choices": [choice]}) for choice in choices.values()]
 
     # Responses
 
@@ -177,7 +170,7 @@ class SseRestorer:
     # Anthropic Messages
 
     def _anthropic(self, payload: dict[str, Any], event: str | None) -> list[Event]:
-        kind = payload.get("type")
+        kind = payload.get("type") if isinstance(payload.get("type"), str) else None
         if kind == "content_block_delta" and isinstance(payload.get("delta"), dict):
             index = payload.get("index", 0)
             delta = payload["delta"]
@@ -232,8 +225,15 @@ def _responses_key(base: str, payload: dict[str, Any]) -> BufferKey:
     return (base, *(payload.get(field) for field in RESPONSES_KEY_FIELDS))
 
 
-def _merge_chat_leftover(delta: dict[str, Any], key: BufferKey, leftover: str) -> None:
+def _merge_chat_leftover(choice: dict[str, Any], key: BufferKey, leftover: str) -> None:
     field = key[2]
+    if field == LEGACY_TEXT:
+        choice["text"] = (choice.get("text") or "") + leftover
+        return
+    delta = choice.get("delta")
+    if not isinstance(delta, dict):
+        delta = {}
+        choice["delta"] = delta
     if field in CHAT_TEXT_FIELDS:
         delta[field] = (delta.get(field) or "") + leftover
         return

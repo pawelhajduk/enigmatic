@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any
 
-DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+DEFAULT_ANTHROPIC_MAX_TOKENS = 4096
 
 _ANTHROPIC_TO_OPENAI_FINISH = {
     "end_turn": "stop",
@@ -464,7 +464,7 @@ def _responses_content_to_chat(content: object) -> object:
             continue
         if not isinstance(part, dict):
             continue
-        kind = part.get("type")
+        kind = _kind(part)
         if kind in {"input_text", "output_text", "text", "summary_text", "refusal"}:
             parts.append({"type": "text", "text": str(part.get("text") or part.get("refusal") or "")})
         elif kind == "input_image":
@@ -536,11 +536,19 @@ def _responses_tools_to_chat(tools: object) -> list[dict[str, Any]]:
 
 
 def _responses_tool_choice_to_chat(choice: object) -> object:
-    if isinstance(choice, dict) and choice.get("type") == "function" and choice.get("name"):
-        return {"type": "function", "function": {"name": choice["name"]}}
-    if choice in {"auto", "none", "required"}:
+    if isinstance(choice, dict):
+        # Custom tools are sent to Chat upstreams as functions of the same name.
+        if choice.get("type") in {"function", "custom"} and isinstance(choice.get("name"), str):
+            return {"type": "function", "function": {"name": choice["name"]}}
+        return None
+    if isinstance(choice, str) and choice in {"auto", "none", "required"}:
         return choice
     return None
+
+
+def _kind(part: dict[str, Any]) -> str | None:
+    kind = part.get("type")
+    return kind if isinstance(kind, str) else None
 
 
 def responses_input_to_messages(body: dict[str, Any]) -> dict[str, Any]:
@@ -559,7 +567,7 @@ def responses_input_to_messages(body: dict[str, Any]) -> dict[str, Any]:
                 continue
             if not isinstance(item, dict):
                 continue
-            kind = item.get("type")
+            kind = _kind(item)
             if kind in {"function_call", "custom_tool_call"}:
                 arguments = item.get("arguments")
                 if kind == "custom_tool_call":
@@ -638,7 +646,7 @@ def _openai_content_to_anthropic(content: object) -> object:
             continue
         if not isinstance(item, dict):
             continue
-        kind = item.get("type")
+        kind = _kind(item)
         if kind in {"image_url", "input_image"}:
             raw = item.get("image_url")
             url = raw.get("url", "") if isinstance(raw, dict) else raw
