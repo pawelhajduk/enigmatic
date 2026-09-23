@@ -59,6 +59,49 @@ def test_codex_responses_opaque_fields_are_byte_identical() -> None:
     assert json.loads(out["input"][2]["arguments"]) == {"cmd": ["<SCANNED>ls"]}
 
 
+def test_schema_properties_named_type_and_name_do_not_break_the_walk() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["file", "dir"]},
+            "name": {"type": "string", "description": "for ada@example.com"},
+        },
+    }
+    body = {
+        "tools": [{"type": "function", "function": {"name": "search", "parameters": schema}}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "out", "schema": schema}},
+    }
+    out = _walk(body)
+    assert out["tools"][0]["function"]["parameters"]["properties"]["type"] == schema["properties"]["type"]
+    assert out["response_format"]["json_schema"]["schema"]["properties"]["type"]["enum"] == ["file", "dir"]
+    assert "for ada@example.com" in collect_strings(body)
+
+
+def test_anthropic_tool_use_input_is_scanned_as_data() -> None:
+    body = {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "send", "input": {"type": "email", "id": "ada@example.com"}}]}]}
+    block = _walk(body)["messages"][0]["content"][0]
+    assert block["id"] == "toolu_1" and block["name"] == "send"
+    assert block["input"] == {"type": "<SCANNED>email", "id": "<SCANNED>ada@example.com"}
+
+
+def test_same_history_anonymizes_identically_in_fresh_vaults() -> None:
+    """Placeholder numbering follows first appearance, so resent history keeps its prefix cache."""
+
+    class Emails:
+        def anonymize_text(self, text: str, mapping: SessionMapping) -> str:
+            for email in ("bob@example.com", "ada@example.com"):
+                text = text.replace(email, mapping.placeholder_for("EMAIL_ADDRESS", email))
+            return text
+
+    turn1 = {"input": [{"role": "user", "content": "ada@example.com then bob@example.com"}]}
+    turn2 = {"input": [*turn1["input"], {"role": "user", "content": "and bob@example.com again"}]}
+    first = walk(turn1, Emails(), SessionMapping())  # type: ignore[arg-type]
+    second = walk(turn2, Emails(), SessionMapping())  # type: ignore[arg-type]
+    assert isinstance(first, dict) and isinstance(second, dict)
+    assert second["input"][: len(first["input"])] == first["input"]
+    assert "ada@example.com" not in json.dumps(second)
+
+
 def test_unchanged_arguments_keep_original_formatting() -> None:
     class Noop:
         def anonymize_text(self, text: str, mapping: SessionMapping) -> str:
