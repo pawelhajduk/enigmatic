@@ -29,7 +29,7 @@ uv run python -m spacy download en_core_web_sm
 
 Or: `pip install -e .` then the same spaCy download.
 
-Copy `conf/providers.yaml` and set the matching `*_API_KEY` environment variables. You can point `analyzer_conf` at an existing Presidio recognizer YAML.
+Copy `.env.example` to `.env` and set the upstream `*_API_KEY` variables. Set `ENIGMATIC_API_KEY` in that file when clients should authenticate to the proxy. Copy `conf/providers.yaml` if you need to change profiles. You can point `analyzer_conf` at an existing Presidio recognizer YAML.
 
 ## Run
 
@@ -70,11 +70,33 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
+`api_key` can be any string while the local gate is off. When `ENIGMATIC_API_KEY` is set, pass that token instead. See [Access token](#access-token).
+
 Anthropic: same host, model `anthropic/claude-sonnet-4-5`, path `/v1/messages`.
 
 OpenCode / Cline / Codex: set the provider `base_url` to `http://127.0.0.1:47821/v1`. Model prefixes select a profile (`openai/…`, `groq/…`, `anthropic/…`, `copilot/…`).
 
-Optional local gate: set `api_key` in `conf/providers.yaml` and send `Authorization: Bearer <key>`. Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns.
+Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns.
+
+## Access token
+
+Inbound auth matches the OpenAI API. Clients send `Authorization: Bearer <token>` (the OpenAI SDK does this from `api_key`). HTTP Basic is also accepted, with a blank username and the token as the password.
+
+Enigmatic reads that token from the environment. On startup it loads `.env` and `.env.local` from the working directory, from the directory that contains the config file, and from the repo root when the config lives in `conf/`. Existing process variables win. `.env.local` wins over `.env`. Values are not shell-expanded.
+
+```bash
+# .env
+ENIGMATIC_API_KEY=sk-local-change-me
+OPENAI_API_KEY=sk-...
+```
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:47821/v1", api_key="sk-local-change-me")
+```
+
+`api_key_env` in `conf/providers.yaml` selects the variable (default `ENIGMATIC_API_KEY`). A literal `api_key` in that file is used only when the variable is empty. Leave both empty to keep the proxy open on localhost. A missing token returns OpenAI's `invalid_request_error` shape with HTTP 401. `status` reports the gate as enabled or off and never prints the token. `/health` stays unauthenticated.
+
+The same env files supply upstream keys (`OPENAI_API_KEY` and the other `api_key_env` names).
 
 ## Copilot CLI
 

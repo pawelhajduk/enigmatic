@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
+
+from enigmatic.envfile import load_env_files
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_CONF_DIR = PACKAGE_DIR.parents[1] / "conf"
@@ -38,6 +41,7 @@ class EnigmaticConfig(BaseModel):
     listen_host: str = "127.0.0.1"
     listen_port: int = 47821
     api_key: str | None = None
+    api_key_env: str | None = "ENIGMATIC_API_KEY"
     default_profile: str = "openai"
     analyzer_conf: str | None = None
     score_threshold: float = 0.5
@@ -46,6 +50,17 @@ class EnigmaticConfig(BaseModel):
     acp: dict[str, AcpProfile] = Field(default_factory=dict)
     jsonl: dict[str, JsonlProfile] = Field(default_factory=dict)
     enabled_entities: list[str] = Field(default_factory=list)
+
+    @property
+    def resolved_api_key(self) -> str | None:
+        """Access token clients must send. Environment wins over the YAML literal."""
+        if self.api_key_env:
+            from_env = os.environ.get(self.api_key_env, "").strip()
+            if from_env:
+                return from_env
+        if self.api_key and self.api_key.strip():
+            return self.api_key.strip()
+        return None
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -59,12 +74,28 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return loaded
 
 
+def _env_directories(providers_path: Path) -> list[Path]:
+    """Directories searched for `.env` and `.env.local`, most specific first."""
+    resolved = providers_path.expanduser().resolve()
+    directories = [Path.cwd(), resolved.parent]
+    if resolved.parent.name == "conf":
+        directories.append(resolved.parent.parent)
+    return directories
+
+
 def load_config(path: Path | None = None) -> EnigmaticConfig:
-    """Load providers.yaml plus optional recognizer allowlist."""
+    """Load providers.yaml plus optional recognizer allowlist.
+
+    `.env` and `.env.local` are applied first so `ENIGMATIC_API_KEY` and
+    upstream `*_API_KEY` variables are available. Existing process variables
+    are not overwritten.
+    """
     providers_path = path or DEFAULT_PROVIDERS_PATH
     if not providers_path.is_file():
         bundled = PACKAGE_DIR / "data" / "providers.yaml"
         providers_path = bundled if bundled.is_file() else providers_path
+    if providers_path.is_file():
+        load_env_files(_env_directories(providers_path))
     data = _read_yaml(providers_path)
 
     recognizers_path = DEFAULT_RECOGNIZERS_PATH

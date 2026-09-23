@@ -1,7 +1,10 @@
 listen_host: 127.0.0.1
 listen_port: 47821
-# Optional local gate. When set, inbound requests must send Authorization: Bearer <key>.
+# Optional local access token. OpenAI clients send Authorization: Bearer <token>.
+# Prefer ENIGMATIC_API_KEY in .env (see .env.example). api_key is the fallback
+# when that variable is empty. Leave both empty to keep the proxy open.
 api_key: null
+api_key_env: ENIGMATIC_API_KEY
 default_profile: openai
 # Optional path to a Presidio analyzer YAML. When null, Enigmatic's bundled defaults are used.
 analyzer_conf: null

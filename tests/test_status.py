@@ -19,6 +19,7 @@ def test_format_status_prints_listener_pipeline_and_profiles(monkeypatch) -> Non
         listen_host="127.0.0.1",
         listen_port=47821,
         api_key=None,
+        api_key_env=None,
         default_profile="openai",
         enabled_entities=["EMAIL_ADDRESS", "PHONE_NUMBER"],
         http={

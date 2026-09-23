@@ -27,6 +27,7 @@ def _app(http_url: str) -> TestClient:
         listen_host="127.0.0.1",
         listen_port=47821,
         default_profile="openai",
+        api_key_env=None,
         http={"openai": HttpProfile(type="openai", base_url=http_url, api_key_env=None)},
         enabled_entities=["EMAIL_ADDRESS"],
     )
@@ -138,6 +139,7 @@ def test_agent_cli_embeddings_are_501() -> None:
 
     cfg = EnigmaticConfig(
         default_profile="copilot",
+        api_key_env=None,
         acp={"copilot": AcpProfile(command="copilot")},
         jsonl={"copilot": JsonlProfile(command="copilot")},
     )

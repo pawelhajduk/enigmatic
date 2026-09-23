@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from enigmatic import __version__
+from enigmatic.auth import openai_auth_error, token_from_authorization, tokens_equal
 from enigmatic.config import EnigmaticConfig, load_config
 from enigmatic.openai_walk import walk
 from enigmatic.presidio_ops.mapping import STORE, SessionMapping
@@ -101,12 +102,17 @@ def create_app(
     )
 
     def check_gate(request: Request) -> JSONResponse | None:
-        if not cfg.api_key:
+        expected = cfg.resolved_api_key
+        if not expected:
             return None
-        auth = request.headers.get("authorization", "")
-        if auth != f"Bearer {cfg.api_key}":
-            return JSONResponse({"error": {"message": "Invalid local API key", "type": "auth"}}, 401)
-        return None
+        token = token_from_authorization(request.headers.get("authorization"))
+        if token is not None and tokens_equal(token, expected):
+            return None
+        return JSONResponse(
+            openai_auth_error(provided=token is not None),
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="Enigmatic"'},
+        )
 
     async def read_body(request: Request) -> dict[str, Any]:
         payload = await request.json()
@@ -393,7 +399,10 @@ def create_app(
         logger.info("anthropic.messages session=%s", session_id_from_request(request))
         return await handle_anthropic(request, body)
 
-    def _not_implemented_handler(request: Request) -> JSONResponse:
+    async def _not_implemented_handler(request: Request) -> JSONResponse:
+        gate = check_gate(request)
+        if gate:
+            return gate
         return JSONResponse(
             {
                 "error": {
