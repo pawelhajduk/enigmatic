@@ -358,6 +358,9 @@ class ResponsesStreamBuilder:
         self._usage: dict[str, Any] | None = None
         self._failed: dict[str, Any] | None = None
 
+    def _sorted_output(self) -> list[dict[str, Any]]:
+        return [_public(item) for item in sorted(self._output, key=lambda item: item["_index"])]
+
     def _event(self, payload: dict[str, Any]) -> SseItem:
         payload["sequence_number"] = self._sequence
         self._sequence += 1
@@ -370,7 +373,7 @@ class ResponsesStreamBuilder:
             "created_at": self.created_at,
             "status": status,
             "model": self.model,
-            "output": list(self._output) if status != "in_progress" else [],
+            "output": self._sorted_output() if status != "in_progress" else [],
             "parallel_tool_calls": bool(self._request.get("parallel_tool_calls", True)),
             "tool_choice": self._request.get("tool_choice", "auto"),
             "tools": self._request.get("tools") or [],
@@ -509,7 +512,7 @@ class ResponsesStreamBuilder:
         message["content"] = [part]
         message["status"] = "completed"
         index = message["_index"]
-        self._output.append(_public(message))
+        self._output.append(dict(message))
         text = self._message_text
         self._message_text = ""
         return [
@@ -566,7 +569,7 @@ class ResponsesStreamBuilder:
                     {"type": "response.output_item.done", "output_index": item["_index"], "item": _public(item)}
                 )
             )
-            self._output.append(_public(item))
+            self._output.append(dict(item))
         self._calls = {}
         self._call_order = []
         return events
