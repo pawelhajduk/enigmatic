@@ -46,9 +46,46 @@ def secret_recognizers() -> list[PatternRecognizer]:
             name="PemKeyRecognizer",
             patterns=[
                 Pattern(
-                    "pem_begin",
-                    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----",
+                    "pem_block",
+                    r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"
+                    r"[\s\S]{0,16000}?"
+                    # \Z, not $: Presidio compiles with re.MULTILINE, where $ ends the BEGIN line.
+                    r"(?:-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----|\Z)",
                     0.95,
+                )
+            ],
+        ),
+        PatternRecognizer(
+            supported_entity="JWT",
+            name="JwtRecognizer",
+            patterns=[
+                Pattern(
+                    "jwt",
+                    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b",
+                    0.85,
+                )
+            ],
+        ),
+        PatternRecognizer(
+            supported_entity="SLACK_TOKEN",
+            name="SlackTokenRecognizer",
+            patterns=[Pattern("slack", r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", 0.9)],
+        ),
+        PatternRecognizer(
+            supported_entity="STRIPE_KEY",
+            name="StripeKeyRecognizer",
+            patterns=[
+                Pattern("stripe", r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b", 0.9)
+            ],
+        ),
+        PatternRecognizer(
+            supported_entity="CONNECTION_STRING",
+            name="ConnectionStringRecognizer",
+            patterns=[
+                Pattern(
+                    "db_url",
+                    r"\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s'\"<>]+",
+                    0.85,
                 )
             ],
         ),

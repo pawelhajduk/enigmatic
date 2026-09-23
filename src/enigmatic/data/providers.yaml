@@ -125,7 +125,9 @@ jsonl:
       - "stream-json"
       - "--permission-mode"
       - "dontAsk"
-  # Codex CLI. Uses `codex login` (or CODEX_API_KEY). Default sandbox is read-only.
+      - "--disallowedTools"
+      - "Bash,Edit,Write,Read,WebFetch,WebSearch"
+  # Codex CLI. Uses `codex login` (or CODEX_API_KEY). The read-only sandbox refuses writes.
   codex:
     command: codex
     prompt_flag: ""

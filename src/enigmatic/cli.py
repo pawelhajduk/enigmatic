@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
+from enigmatic.auth import bind_requires_api_key
 from enigmatic.config import load_config
 from enigmatic.doctor import collect_doctor, format_status
 from enigmatic.dry_run import anonymize_json_preview, anonymize_preview, format_preview
@@ -34,9 +35,20 @@ def serve(
     cfg = load_config(config)
     bind_host = host or cfg.listen_host
     bind_port = port or cfg.listen_port
+    if bind_requires_api_key(bind_host, cfg.resolved_api_key):
+        typer.echo(
+            f"Refusing to listen on {bind_host} without ENIGMATIC_API_KEY.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     cfg.listen_host = bind_host
     cfg.listen_port = bind_port
     fastapi_app = create_app(cfg)
+    if not cfg.resolved_api_key:
+        typer.echo(
+            "warning: auth gate is off; any local account can use this proxy",
+            err=True,
+        )
     typer.echo(format_status(cfg))
     uvicorn.run(fastapi_app, host=bind_host, port=bind_port, log_level="warning")
 

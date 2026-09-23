@@ -12,6 +12,9 @@ from enigmatic.config import JsonlProfile
 
 logger = logging.getLogger("enigmatic.jsonl")
 
+AGENT_TIMEOUT_SECONDS = 120.0
+_DENY_MARKERS = ("--deny-tool", "--disallowedtools", "--disallowed-tools", "dontask")
+
 
 class JsonlError(RuntimeError):
     pass
@@ -19,6 +22,15 @@ class JsonlError(RuntimeError):
 
 def command_on_path(command: str) -> bool:
     return shutil.which(command) is not None
+
+
+def jsonl_denies_tools(profile: JsonlProfile) -> bool:
+    """True when the CLI args tell the agent to refuse tool use."""
+    blob = " ".join(profile.extra_args).lower()
+    if any(marker in blob for marker in _DENY_MARKERS):
+        return True
+    # Codex exec refuses writes with an explicit read-only sandbox.
+    return "--sandbox" in blob and "read-only" in blob
 
 
 def parse_copilot_jsonl(line: str) -> str | None:
@@ -97,24 +109,19 @@ def parse_claude_jsonl(line: str) -> str | None:
 
 
 def build_jsonl_argv(profile: JsonlProfile, prompt: str, model: str | None) -> list[str]:
-    """Argv for an existing CLI. The prompt is not an API request."""
-    if profile.prompt_stdin:
-        args = list(profile.extra_args)
-        if model and profile.model_flag:
-            if args and args[-1] == "-":
-                args = [*args[:-1], profile.model_flag, model, "-"]
-            else:
-                args = [*args, profile.model_flag, model]
-        argv = [profile.command, *args]
-        if profile.prompt_flag:
-            argv.append(profile.prompt_flag)
-        return argv
-    argv = [profile.command, *profile.extra_args]
+    """Argv for an existing CLI. `prompt` is passed on stdin, never as an argument."""
+    del prompt
+    args = list(profile.extra_args)
+    if model and profile.model_flag:
+        if args and args[-1] == "-":
+            args = [*args[:-1], profile.model_flag, model, "-"]
+        else:
+            args.extend([profile.model_flag, model])
+    argv = [profile.command, *args]
     if profile.prompt_flag:
         argv.append(profile.prompt_flag)
-    argv.append(prompt)
-    if model and profile.model_flag:
-        argv.extend([profile.model_flag, model])
+    if argv[-1] != "-":
+        argv.append("-")
     return argv
 
 
@@ -141,17 +148,28 @@ async def run_jsonl_prompt(
             f"{profile.command} is not on PATH. Install that coding-agent CLI and log in; "
             "Enigmatic only forwards the anonymized prompt to it."
         )
+    if not jsonl_denies_tools(profile):
+        raise JsonlError(f"{profile.command} does not deny tools")
     chosen = parser or profile.parser
-    argv = build_jsonl_argv(profile, prompt, model if model and model != "default" else None)
+    usable_model = model if model and model != "default" else None
+    # `-` means "read the prompt from stdin" so the text is not visible in process listings.
+    argv = build_jsonl_argv(profile, prompt, usable_model)
     logger.info("jsonl spawn %s", profile.command)
     proc = await asyncio.create_subprocess_exec(
         *argv,
-        stdin=asyncio.subprocess.PIPE if profile.prompt_stdin else None,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdin_bytes = prompt.encode("utf-8") if profile.prompt_stdin else None
-    stdout, stderr = await proc.communicate(stdin_bytes)
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(prompt.encode("utf-8")),
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise JsonlError(f"{profile.command} timed out") from None
     if proc.returncode not in (0, None) and not stdout:
         err = stderr.decode("utf-8", errors="replace")
         raise JsonlError(err.strip() or f"{profile.command} exited {proc.returncode}")

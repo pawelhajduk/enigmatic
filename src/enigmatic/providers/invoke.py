@@ -13,8 +13,8 @@ from enigmatic.config import EnigmaticConfig
 from enigmatic.presidio_ops.mapping import STORE, SessionMapping
 from enigmatic.presidio_ops.pipeline import Pipeline
 from enigmatic.providers.acp import run_acp_prompt
-from enigmatic.providers.jsonl import run_jsonl_prompt
-from enigmatic.providers.router import Route, Router
+from enigmatic.providers.jsonl import jsonl_denies_tools, run_jsonl_prompt
+from enigmatic.providers.router import Route, RouteError, Router
 
 logger = logging.getLogger("enigmatic.invoke")
 
@@ -41,6 +41,8 @@ async def invoke_agent(route: Route, prompt: str) -> str:
                 raise
     if route.jsonl is None:
         raise AgentRouteError(f"No agent CLI configured for {route.profile_id}")
+    if not jsonl_denies_tools(route.jsonl):
+        raise RouteError(f"Agent profile {route.profile_id} does not deny tools")
     return await run_jsonl_prompt(
         route.jsonl,
         prompt,

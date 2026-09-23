@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -17,6 +18,7 @@ from enigmatic.presidio_ops.placeholder import PlaceholderOperator
 from enigmatic.presidio_ops.secrets import secret_recognizers
 
 logger = logging.getLogger("enigmatic.presidio")
+_ANALYZE_LOCK = threading.Lock()
 
 DEFAULT_ENTITIES = [
     "EMAIL_ADDRESS",
@@ -37,6 +39,10 @@ DEFAULT_ENTITIES = [
     "AWS_ACCESS_KEY",
     "AWS_SECRET_KEY",
     "PEM_KEY",
+    "JWT",
+    "SLACK_TOKEN",
+    "STRIPE_KEY",
+    "CONNECTION_STRING",
 ]
 
 
@@ -51,6 +57,20 @@ class Pipeline:
     def anonymize_text(self, text: str, mapping: SessionMapping) -> str:
         if not text:
             return text
+        cached = mapping.cached_anonymized(text)
+        if cached is not None:
+            return cached
+        # One analyzer for the process. The lock keeps spaCy off concurrent callers
+        # while `asyncio.to_thread` keeps the event loop free for other requests.
+        with _ANALYZE_LOCK:
+            cached = mapping.cached_anonymized(text)
+            if cached is not None:
+                return cached
+            anonymized = self._anonymize_uncached(text, mapping)
+        mapping.remember_anonymized(text, anonymized)
+        return anonymized
+
+    def _anonymize_uncached(self, text: str, mapping: SessionMapping) -> str:
         results = self.analyzer.analyze(
             text=text,
             language=self.language,

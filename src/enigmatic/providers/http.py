@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -16,9 +16,38 @@ from enigmatic.protocols.sse import (
     map_anthropic_sse_to_openai,
     map_openai_sse_to_anthropic,
 )
-from enigmatic.restore import StreamRestorer
+from enigmatic.protocols.stream_restore import Dialect, SseRestorer
 
 logger = logging.getLogger("enigmatic.http")
+
+DEFAULT_READ_TIMEOUT = 600.0
+# Long read window for token streams and slow reasoning. Connect stays short so a dead
+# upstream fails fast. The read default matches the OpenAI SDK's 600 s request timeout.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=DEFAULT_READ_TIMEOUT, write=30.0, pool=10.0)
+# Inbound headers that carry OpenAI or Anthropic request semantics and are safe to forward.
+FORWARD_REQUEST_HEADERS = {
+    "openai": (
+        "openai-beta",
+        "openai-organization",
+        "openai-project",
+        "idempotency-key",
+        "x-client-request-id",
+        "session_id",
+        "conversation_id",
+        "originator",
+    ),
+    "anthropic": ("anthropic-beta", "anthropic-version", "idempotency-key"),
+}
+RETURN_RESPONSE_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "openai-processing-ms",
+    "openai-version",
+    "retry-after",
+    "retry-after-ms",
+)
+RETURN_RESPONSE_HEADER_PREFIXES = ("x-ratelimit-", "anthropic-ratelimit-")
+MAX_SSE_LINE_BYTES = 1024 * 1024
 
 
 class HttpProviderError(Exception):
@@ -52,10 +81,34 @@ def build_headers(profile: HttpProfile, extra: dict[str, str] | None = None) -> 
     if extra:
         for name, value in extra.items():
             lowered = name.lower()
-            if lowered in {"host", "content-length", "authorization", "x-api-key"}:
+            if lowered in {"host", "content-length", "authorization", "x-api-key", "api-key"}:
                 continue
-            headers[name] = value
+            headers[lowered] = value
     return headers
+
+
+def forwardable_request_headers(headers: Any, upstream_type: str) -> dict[str, str]:
+    """Client headers to pass upstream. `headers` is any case-insensitive mapping."""
+    allowed = FORWARD_REQUEST_HEADERS["anthropic" if upstream_type == "anthropic" else "openai"]
+    out: dict[str, str] = {}
+    for name in allowed:
+        value = headers.get(name)
+        if value:
+            out[name] = value
+    return out
+
+
+def returnable_response_headers(response: Any) -> dict[str, str]:
+    """Upstream headers clients use for retries, rate limits, and support ids."""
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return {}
+    out: dict[str, str] = {}
+    for name, value in headers.items():
+        lowered = name.lower()
+        if lowered in RETURN_RESPONSE_HEADERS or lowered.startswith(RETURN_RESPONSE_HEADER_PREFIXES):
+            out[lowered] = value
+    return out
 
 
 def join_url(base_url: str, path: str) -> str:
@@ -77,7 +130,15 @@ class HttpProvider:
 
     async def _client_obj(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
+            timeout = DEFAULT_TIMEOUT
+            if self.profile.read_timeout is not None:
+                timeout = httpx.Timeout(
+                    connect=DEFAULT_TIMEOUT.connect,
+                    read=self.profile.read_timeout,
+                    write=DEFAULT_TIMEOUT.write,
+                    pool=DEFAULT_TIMEOUT.pool,
+                )
+            self._client = httpx.AsyncClient(timeout=timeout)
         return self._client
 
     async def request(
@@ -87,14 +148,15 @@ class HttpProvider:
         body: dict[str, Any] | None,
         stream: bool,
         extra_headers: dict[str, str] | None = None,
-        query: dict[str, str] | None = None,
+        query: dict[str, str] | list[tuple[str, str]] | None = None,
     ) -> httpx.Response:
         client = await self._client_obj()
         url = join_url(self.profile.base_url, path)
         headers = build_headers(self.profile, extra_headers)
-        params = dict(query or {})
-        if self.profile.api_version and "api-version" not in params and self.profile.type != "anthropic":
-            params["api-version"] = self.profile.api_version
+        params = list(query.items()) if isinstance(query, dict) else list(query or [])
+        has_version = any(name == "api-version" for name, _value in params)
+        if self.profile.api_version and not has_version and self.profile.type != "anthropic":
+            params.append(("api-version", self.profile.api_version))
         logger.info("http %s %s stream=%s", method, url, stream)
         request = client.build_request(
             method,
@@ -116,70 +178,96 @@ async def iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     buffer = ""
     async for raw in response.aiter_bytes():
         buffer += raw.decode("utf-8", errors="replace")
+        if len(buffer) > MAX_SSE_LINE_BYTES and "\n" not in buffer:
+            raise HttpProviderError(502, b"upstream SSE line too large", {})
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
+            if len(line) > MAX_SSE_LINE_BYTES:
+                raise HttpProviderError(502, b"upstream SSE line too large", {})
             yield line
+    if len(buffer) > MAX_SSE_LINE_BYTES:
+        raise HttpProviderError(502, b"upstream SSE line too large", {})
     if buffer:
         yield buffer
 
 
-_STREAM_TEXT_KEYS = {"content", "text", "arguments"}
+async def close_response(response: httpx.Response) -> None:
+    close = getattr(response, "aclose", None)
+    if close is not None:
+        await close()
 
 
-def restore_sse_data_line(line: str, restorer: StreamRestorer) -> str:
-    stripped = line.strip()
-    if not stripped.startswith("data:"):
-        return line if line.endswith("\n") else line + "\n"
-    payload = stripped[5:].strip()
-    if payload == "[DONE]":
-        return "data: [DONE]\n\n"
+SseItem = tuple[str | None, Any]
+DONE = "[DONE]"
+
+
+async def iter_sse_events(response: httpx.Response) -> AsyncIterator[SseItem]:
+    """Yield `(event_name, payload)`; payload is parsed JSON, `DONE`, or raw text."""
+    event_name: str | None = None
+    async for raw_line in iter_sse_lines(response):
+        line = raw_line.rstrip("\r")
+        if line.startswith("event:"):
+            event_name = line[6:].strip() or None
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == DONE:
+            yield event_name, DONE
+        else:
+            try:
+                yield event_name, json.loads(data)
+            except json.JSONDecodeError:
+                yield event_name, data
+        event_name = None
+
+
+def format_sse_item(event: str | None, payload: Any) -> bytes:
+    data = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    if event:
+        return f"event: {event}\ndata: {data}\n\n".encode()
+    return f"data: {data}\n\n".encode()
+
+
+async def restored_events(
+    response: httpx.Response,
+    mapping: SessionMapping,
+    dialect: Dialect,
+    on_response_id: Callable[[str], None] | None = None,
+) -> AsyncIterator[SseItem]:
+    """Upstream SSE with placeholders restored per logical text stream."""
+    restorer = SseRestorer(mapping, dialect, on_response_id)
+    uses_events = False
+    finished = False
     try:
-        parsed: Any = json.loads(payload)
-    except json.JSONDecodeError:
-        restored = restorer.feed(payload)
-        return f"data: {restored}\n\n"
-    restored_obj = _restore_stream_text_fields(parsed, restorer)
-    return f"data: {json.dumps(restored_obj, ensure_ascii=False)}\n\n"
-
-
-def _restore_stream_text_fields(value: Any, restorer: StreamRestorer) -> Any:
-    """Restore only token-stream fields so ids and roles are not mixed into the buffer."""
-    if isinstance(value, list):
-        return [_restore_stream_text_fields(item, restorer) for item in value]
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            if key in _STREAM_TEXT_KEYS and isinstance(item, str):
-                out[key] = restorer.feed(item)
-            else:
-                out[key] = _restore_stream_text_fields(item, restorer)
-        return out
-    return value
+        async for event, payload in iter_sse_events(response):
+            uses_events = uses_events or event is not None
+            if payload == DONE:
+                for item in restorer.finish():
+                    yield item
+                finished = True
+                yield None, DONE
+                continue
+            if isinstance(payload, str):
+                yield event, mapping.restore_complete(payload)
+                continue
+            for synth_event, restored in restorer.restore(payload, event):
+                yield (synth_event if uses_events else None), restored
+        if not finished:
+            for synth_event, restored in restorer.finish():
+                yield (synth_event if uses_events else None), restored
+    finally:
+        await close_response(response)
 
 
 async def restored_sse(
     response: httpx.Response,
     mapping: SessionMapping,
+    dialect: Dialect = "chat",
+    on_response_id: Callable[[str], None] | None = None,
 ) -> AsyncIterator[bytes]:
-    restorer = StreamRestorer(mapping)
-    event_prefix = ""
-    async for line in iter_sse_lines(response):
-        if line.startswith("event:"):
-            event_prefix = line if line.endswith("\n") else line + "\n"
-            continue
-        if line.startswith("data:"):
-            out = restore_sse_data_line(line, restorer)
-            if event_prefix:
-                yield (event_prefix + out).encode("utf-8")
-                event_prefix = ""
-            else:
-                yield out.encode("utf-8")
-            continue
-        if not line.strip():
-            continue
-    leftover = restorer.flush()
-    if leftover:
-        yield f"data: {json.dumps(leftover, ensure_ascii=False)}\n\n".encode()
+    async for event, payload in restored_events(response, mapping, dialect, on_response_id):
+        yield format_sse_item(event, payload)
 
 
 async def translate_and_restore_openai_to_anthropic(
@@ -187,16 +275,7 @@ async def translate_and_restore_openai_to_anthropic(
     mapping: SessionMapping,
     model: str,
 ) -> AsyncIterator[bytes]:
-    restorer = StreamRestorer(mapping)
-
-    async def restored_lines() -> AsyncIterator[str]:
-        async for line in iter_sse_lines(response):
-            if line.startswith("data:"):
-                yield restore_sse_data_line(line, restorer).rstrip("\n")
-            else:
-                yield line
-
-    async for chunk in map_openai_sse_to_anthropic(restored_lines(), model):
+    async for chunk in map_openai_sse_to_anthropic(restored_events(response, mapping, "chat"), model):
         yield chunk
 
 
@@ -204,15 +283,8 @@ async def translate_and_restore_anthropic_to_openai(
     response: httpx.Response,
     mapping: SessionMapping,
     model: str,
+    include_usage: bool = False,
 ) -> AsyncIterator[bytes]:
-    restorer = StreamRestorer(mapping)
-
-    async def restored_lines() -> AsyncIterator[str]:
-        async for line in iter_sse_lines(response):
-            if line.startswith("data:"):
-                yield restore_sse_data_line(line, restorer).rstrip("\n")
-            else:
-                yield line
-
-    async for chunk in map_anthropic_sse_to_openai(restored_lines(), model):
+    events = restored_events(response, mapping, "anthropic")
+    async for chunk in map_anthropic_sse_to_openai(events, model, include_usage=include_usage):
         yield chunk

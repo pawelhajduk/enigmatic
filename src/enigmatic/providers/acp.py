@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import shutil
+import tempfile
 from typing import Any
 
 from enigmatic import __version__
@@ -25,8 +25,18 @@ from enigmatic.config import AcpProfile
 
 logger = logging.getLogger("enigmatic.acp")
 
-_TURN_TIMEOUT_S = 600.0
+AGENT_TIMEOUT_SECONDS = 120.0
 _MESSAGE_KINDS = frozenset({"agent_message_chunk", "agent_message"})
+DEFAULT_DENY_TOOLS = (
+    "shell",
+    "bash",
+    "write",
+    "read",
+    "edit",
+    "url",
+    "memory",
+    "fetch",
+)
 
 
 def command_on_path(command: str) -> bool:
@@ -35,6 +45,16 @@ def command_on_path(command: str) -> bool:
 
 def deny_permission(_request: dict[str, Any]) -> dict[str, Any]:
     return {"outcome": {"outcome": "cancelled"}}
+
+
+def acp_argv(profile: AcpProfile) -> list[str]:
+    """CLI argv with tool-deny flags. Permission requests are still cancelled in-process."""
+    tools = list(dict.fromkeys([*profile.deny_tools, *DEFAULT_DENY_TOOLS]))
+    argv = [profile.command, *profile.args]
+    for tool in tools:
+        argv.append(f"--deny-tool={tool}")
+        argv.append(f"--excluded-tools={tool}")
+    return argv
 
 
 class AcpError(RuntimeError):
@@ -116,6 +136,11 @@ def _usable_model(model: str | None) -> str | None:
     return model
 
 
+async def _run_with_sdk(*_args: object, **_kwargs: object) -> str | None:
+    """Optional SDK hook. The raw client owns the turn, including ACP v2."""
+    return None
+
+
 async def run_acp_prompt(
     profile: AcpProfile,
     prompt: str,
@@ -127,7 +152,36 @@ async def run_acp_prompt(
             f"{profile.command} is not on PATH. Install that coding-agent CLI and log in; "
             "Enigmatic only forwards the anonymized prompt to it."
         )
-    return await _run_raw_jsonrpc(profile, prompt, _usable_model(model), cwd)
+    argv = acp_argv(profile)
+    usable_model = _usable_model(model)
+    # Agents start in an empty directory so a tool that ignores the deny list
+    # is not already sitting in the user's project.
+    owned_dir: tempfile.TemporaryDirectory[str] | None = None
+    if cwd is None:
+        owned_dir = tempfile.TemporaryDirectory(prefix="enigmatic-agent-")
+        cwd = owned_dir.name
+    try:
+        try:
+            text = await asyncio.wait_for(
+                _run_with_sdk(argv, prompt, usable_model, cwd),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+            if text:
+                return text
+        except TimeoutError as exc:
+            raise AcpError(f"{profile.command} timed out") from exc
+        except Exception as exc:
+            logger.info("ACP SDK path failed, using raw JSON-RPC: %s", exc)
+        try:
+            return await asyncio.wait_for(
+                _run_raw_jsonrpc(profile, prompt, usable_model, cwd, argv),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise AcpError(f"{profile.command} timed out") from exc
+    finally:
+        if owned_dir is not None:
+            owned_dir.cleanup()
 
 
 async def _run_raw_jsonrpc(
@@ -135,17 +189,15 @@ async def _run_raw_jsonrpc(
     prompt: str,
     model: str | None,
     cwd: str | None,
+    argv: list[str] | None = None,
 ) -> str:
-    argv = [profile.command, *profile.args]
-    for tool in profile.deny_tools:
-        argv.append(f"--deny-tool={tool}")
-        argv.append(f"--excluded-tools={tool}")
-
+    command = argv if argv is not None else acp_argv(profile)
     proc = await asyncio.create_subprocess_exec(
-        *argv,
+        *command,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     if proc.stdin is None or proc.stdout is None or proc.stderr is None:
         raise AcpError("ACP process missing stdio")
@@ -224,7 +276,7 @@ async def _run_raw_jsonrpc(
         pending[msg_id] = fut
         await write({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params})
         try:
-            return await asyncio.wait_for(fut, _TURN_TIMEOUT_S)
+            return await asyncio.wait_for(fut, AGENT_TIMEOUT_SECONDS)
         finally:
             pending.pop(msg_id, None)
 
@@ -249,7 +301,7 @@ async def _run_raw_jsonrpc(
                 logger.info("ACP authenticate continued with the CLI's existing login: %s", exc)
         session = await rpc(
             "session/new",
-            {"cwd": cwd or os.getcwd(), "mcpServers": []},
+            {"cwd": cwd or ".", "mcpServers": []},
         )
         session_id = session.get("sessionId") or session.get("session_id")
         if model:
@@ -264,7 +316,7 @@ async def _run_raw_jsonrpc(
         stop = result.get("stopReason") or result.get("stop_reason")
         if not stop:
             try:
-                await asyncio.wait_for(turn_done.wait(), _TURN_TIMEOUT_S)
+                await asyncio.wait_for(turn_done.wait(), AGENT_TIMEOUT_SECONDS)
             except TimeoutError:
                 if not transcript.text():
                     err = "".join(stderr_lines).strip()

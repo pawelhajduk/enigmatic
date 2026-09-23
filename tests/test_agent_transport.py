@@ -272,7 +272,7 @@ def test_jsonl_stdin_calls_existing_binary(tmp_path: Path) -> None:
     log_path = tmp_path / "prompt.txt"
     profile = JsonlProfile(
         command=sys.executable,
-        extra_args=[str(script), str(log_path)],
+        extra_args=[str(script), str(log_path), "--deny-tool=shell"],
         prompt_flag="",
         prompt_stdin=True,
         parser="codex",

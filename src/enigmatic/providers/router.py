@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 from enigmatic.config import AcpProfile, EnigmaticConfig, HttpProfile, JsonlProfile
 from enigmatic.protocols.translate import strip_model_prefix
+from enigmatic.providers.jsonl import jsonl_denies_tools
+
+
+class RouteError(Exception):
+    """The request mapped to a profile that is not safe to run."""
 
 
 @dataclass
@@ -43,7 +48,7 @@ class Router:
             )
 
         if hint in self.config.jsonl:
-            return Route(kind="jsonl", profile_id=hint, model=bare or raw, jsonl=self.config.jsonl[hint])
+            return self._jsonl_route(hint, bare or raw, self.config.jsonl[hint])
 
         if inbound == "anthropic" and "anthropic" in self.config.http:
             profile = self.config.http["anthropic"]
@@ -63,5 +68,12 @@ class Router:
                 acp=self.config.acp[default],
                 jsonl=self.config.jsonl.get(default),
             )
+        if default in self.config.jsonl:
+            return self._jsonl_route(default, bare or raw, self.config.jsonl[default])
 
         raise KeyError(f"No provider profile for model {model!r} (hint={hint!r})")
+
+    def _jsonl_route(self, profile_id: str, model: str, profile: JsonlProfile) -> Route:
+        if not jsonl_denies_tools(profile):
+            raise RouteError(f"Agent profile {profile_id} does not deny tools")
+        return Route(kind="jsonl", profile_id=profile_id, model=model, jsonl=profile)

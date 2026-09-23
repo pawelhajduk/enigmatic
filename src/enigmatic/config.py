@@ -23,6 +23,8 @@ class HttpProfile(BaseModel):
     api_key_env: str | None = None
     auth_header: str = "Authorization"
     api_version: str | None = None
+    # Seconds between upstream bytes before giving up. None uses the 600 s default.
+    read_timeout: float | None = None
 
 
 class AcpProfile(BaseModel):
@@ -59,6 +61,8 @@ class EnigmaticConfig(BaseModel):
     acp: dict[str, AcpProfile] = Field(default_factory=dict)
     jsonl: dict[str, JsonlProfile] = Field(default_factory=dict)
     enabled_entities: list[str] = Field(default_factory=list)
+    # Inbound JSON body cap in bytes. None uses the server default.
+    max_body_bytes: int | None = None
 
     @property
     def resolved_api_key(self) -> str | None:
