@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import threading
 import time
@@ -13,6 +14,12 @@ REDACTED = "<REDACTED>"
 DEFAULT_MAX_SESSIONS = 128
 DEFAULT_SESSION_TTL_SECONDS = 60 * 60
 DEFAULT_MAX_ENTRIES = 4096
+# String fields whose value is JSON text. Originals restored into them must be JSON-escaped.
+JSON_STRING_KEYS = frozenset({"arguments", "partial_json"})
+
+
+def json_escape(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)[1:-1]
 
 
 def format_placeholder(entity_type: str, index: int) -> str:
@@ -79,11 +86,14 @@ class SessionMapping:
                 return
             self._cache[digest] = anonymized
 
-    def restore_complete(self, text: str) -> str:
+    def restore_complete(self, text: str, *, escape_json: bool = False) -> str:
         """Replace placeholders in a finished string. Longest token first."""
+        if "<" not in text:
+            return text
         result = text
         for token, original in self.reverse_items():
-            result = result.replace(token, original)
+            if token in result:
+                result = result.replace(token, json_escape(original) if escape_json else original)
         return result
 
     def restore_complete_any(self, value: object) -> object:
@@ -92,7 +102,12 @@ class SessionMapping:
         if isinstance(value, list):
             return [self.restore_complete_any(item) for item in value]
         if isinstance(value, dict):
-            return {key: self.restore_complete_any(item) for key, item in value.items()}
+            return {
+                key: self.restore_complete(item, escape_json=True)
+                if key in JSON_STRING_KEYS and isinstance(item, str)
+                else self.restore_complete_any(item)
+                for key, item in value.items()
+            }
         return value
 
 
@@ -108,9 +123,30 @@ class MappingStore:
         self._lock = threading.Lock()
         self._sessions: dict[str, SessionMapping] = {}
         self._touched: dict[str, float] = {}
+        # (caller namespace, upstream response id) -> (session key, profile id, bound at)
+        self._responses: dict[tuple[str, str], tuple[str, str, float]] = {}
         self._max_sessions = max_sessions
         self._ttl = ttl_seconds
         self._max_entries = max_entries
+
+    def bind_response(self, namespace: str, response_id: str, session_id: str, profile_id: str) -> None:
+        """Remember which vault produced a stored Responses object."""
+        now = time.monotonic()
+        with self._lock:
+            self._responses[(namespace, response_id)] = (session_id, profile_id, now)
+            expired = [key for key, value in self._responses.items() if now - value[2] > self._ttl]
+            for key in expired:
+                self._responses.pop(key, None)
+            while len(self._responses) > self._max_entries:
+                self._responses.pop(next(iter(self._responses)))
+
+    def lookup_response(self, namespace: str, response_id: str) -> tuple[str, str] | None:
+        """Session key and profile for a response id. Namespaced by caller credential."""
+        with self._lock:
+            found = self._responses.get((namespace, response_id))
+            if found is None or time.monotonic() - found[2] > self._ttl:
+                return None
+            return found[0], found[1]
 
     def ephemeral(self) -> SessionMapping:
         """A map that is not stored and cannot be reused by another request."""
