@@ -196,6 +196,33 @@ async def test_restored_sse_keeps_event_lines_and_never_emits_bare_strings() -> 
     assert "".join(payload["delta"] for payload in payloads) == "x ada@example.com <Y"
 
 
+def test_legacy_completions_stream_text_is_restored() -> None:
+    restorer = SseRestorer(_mapping(), "chat")
+    chunks = _run(
+        restorer,
+        [
+            {"id": "cmpl-1", "object": "text_completion", "choices": [{"index": 0, "text": "to <EMAIL_ADD", "finish_reason": None}]},
+            {"id": "cmpl-1", "object": "text_completion", "choices": [{"index": 0, "text": "RESS_1> <Z", "finish_reason": "stop"}]},
+        ],
+    )
+    assert "".join(chunk["choices"][0]["text"] for chunk in chunks) == "to ada@example.com <Z"
+    assert all("delta" not in chunk["choices"][0] for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_multibyte_characters_split_across_network_chunks_survive() -> None:
+    from enigmatic.providers.http import iter_sse_lines
+
+    class OneByteAtATime:
+        async def aiter_bytes(self) -> Any:
+            data = 'data: {"t":"café 日本 🎉"}\n'.encode()
+            for i in range(len(data)):
+                yield data[i : i + 1]
+
+    lines = [line async for line in iter_sse_lines(OneByteAtATime())]  # type: ignore[arg-type]
+    assert lines == ['data: {"t":"café 日本 🎉"}']
+
+
 def test_non_streaming_restore_escapes_json_arguments() -> None:
     mapping = _mapping()
     restored = mapping.restore_complete_any(
