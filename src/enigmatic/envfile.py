@@ -12,6 +12,18 @@ import re
 from pathlib import Path
 
 _KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Proxy and CA variables in a project .env would redirect upstream traffic.
+_BLOCKED_ENV_KEYS = {
+    "ALL_PROXY",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "NO_PROXY",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+}
 _ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"', "'": "'"}
 
 
@@ -83,6 +95,8 @@ def load_env_files(
         if local_path.is_file():
             values.update(parse_env(local_path.read_text(encoding="utf-8")))
         for key, value in values.items():
+            if key.upper() in _BLOCKED_ENV_KEYS:
+                continue
             if key in target or key in applied:
                 continue
             applied[key] = value

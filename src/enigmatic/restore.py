@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from enigmatic.presidio_ops.mapping import PLACEHOLDER_RE, SessionMapping
+from enigmatic.presidio_ops.mapping import SessionMapping
 
 _INCOMPLETE_RE = re.compile(r"<[A-Z0-9_]*$")
 
@@ -15,41 +15,42 @@ class StreamRestorer:
     def __init__(self, mapping: SessionMapping) -> None:
         self._mapping = mapping
         self._buf = ""
+        self._version = -1
+        self._pattern: re.Pattern[str] | None = None
+        self._lookup: dict[str, str] = {}
+
+    def _sync(self) -> None:
+        version = self._mapping.version
+        if version == self._version:
+            return
+        items = self._mapping.reverse_items()
+        self._lookup = dict(items)
+        if items:
+            # Longest token is first, and Python uses the leftmost alternative.
+            self._pattern = re.compile("|".join(re.escape(token) for token, _value in items))
+        else:
+            self._pattern = None
+        self._version = version
+
+    def _replace(self, text: str) -> str:
+        if not text:
+            return ""
+        self._sync()
+        if self._pattern is None:
+            return text
+        return self._pattern.sub(lambda match: self._lookup.get(match.group(0), match.group(0)), text)
 
     def feed(self, chunk: str) -> str:
         self._buf += chunk
-        longest = self._mapping.reverse_items()
-        out: list[str] = []
-        i = 0
-        text = self._buf
-        while i < len(text):
-            if text[i] != "<":
-                out.append(text[i])
-                i += 1
-                continue
-            matched: str | None = None
-            original: str | None = None
-            for token, value in longest:
-                if text.startswith(token, i):
-                    matched = token
-                    original = value
-                    break
-            if matched is None:
-                generic = PLACEHOLDER_RE.match(text, i)
-                if generic:
-                    matched = generic.group(0)
-                    original = self._mapping.original_for(matched) or matched
-            if matched is not None and original is not None:
-                out.append(original)
-                i += len(matched)
-                continue
-            rest = text[i:]
-            if _INCOMPLETE_RE.match(rest) and ">" not in rest:
-                break
-            out.append(text[i])
-            i += 1
-        self._buf = text[i:]
-        return "".join(out)
+        hold = ""
+        incomplete = _INCOMPLETE_RE.search(self._buf)
+        if incomplete is not None and ">" not in incomplete.group(0):
+            hold = incomplete.group(0)
+            ready = self._buf[: incomplete.start()]
+        else:
+            ready = self._buf
+        self._buf = hold
+        return self._replace(ready)
 
     def flush(self) -> str:
         leftover = self._buf

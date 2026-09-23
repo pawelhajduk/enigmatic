@@ -12,6 +12,9 @@ from enigmatic.config import JsonlProfile
 
 logger = logging.getLogger("enigmatic.jsonl")
 
+AGENT_TIMEOUT_SECONDS = 120.0
+_DENY_MARKERS = ("--deny-tool", "--disallowedtools", "--disallowed-tools", "dontask")
+
 
 class JsonlError(RuntimeError):
     pass
@@ -19,6 +22,12 @@ class JsonlError(RuntimeError):
 
 def command_on_path(command: str) -> bool:
     return shutil.which(command) is not None
+
+
+def jsonl_denies_tools(profile: JsonlProfile) -> bool:
+    """True when the CLI args tell the agent to refuse tool use."""
+    blob = " ".join(profile.extra_args).lower()
+    return any(marker in blob for marker in _DENY_MARKERS)
 
 
 def parse_copilot_jsonl(line: str) -> str | None:
@@ -77,16 +86,28 @@ async def run_jsonl_prompt(
 ) -> str:
     if not command_on_path(profile.command):
         raise JsonlError(f"{profile.command} is not on PATH")
-    argv = [profile.command, *profile.extra_args, profile.prompt_flag, prompt]
+    if not jsonl_denies_tools(profile):
+        raise JsonlError(f"{profile.command} does not deny tools")
+    # `-` means "read the prompt from stdin" so the text is not visible in process listings.
+    argv = [profile.command, *profile.extra_args, profile.prompt_flag, "-"]
     if model:
         argv.extend(["--model", model])
     logger.info("jsonl spawn %s", profile.command)
     proc = await asyncio.create_subprocess_exec(
         *argv,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(prompt.encode("utf-8")),
+            timeout=AGENT_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise JsonlError(f"{profile.command} timed out") from None
     if proc.returncode not in (0, None) and not stdout:
         err = stderr.decode("utf-8", errors="replace")
         raise JsonlError(err.strip() or f"{profile.command} exited {proc.returncode}")

@@ -39,6 +39,8 @@ def test_walk_anonymizes_message_and_tool_arguments_not_schemas() -> None:
     strings = collect_strings(body)
     assert "email ada@example.com" in strings
     assert '{"email":"ada@example.com"}' in strings
-    assert "ada@example.com in schema" not in strings
+    # Schema structure stays intact. Description and example text is still scanned.
+    assert "ada@example.com in schema" in strings
+    assert "object" not in strings
     assert "openai/gpt-4o" not in strings
     assert "lookup" in strings  # tool name in the call is not under parameters

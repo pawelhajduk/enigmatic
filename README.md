@@ -70,13 +70,13 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
-`api_key` can be any string while the local gate is off. When `ENIGMATIC_API_KEY` is set, pass that token instead. See [Access token](#access-token).
+`api_key` can be any string while the local gate is off. When `ENIGMATIC_API_KEY` is set, pass that token instead. See [Access token](#access-token). Listening on anything other than loopback requires that token; `enigmatic serve --host 0.0.0.0` exits if it is unset.
 
 Anthropic: same host, model `anthropic/claude-sonnet-4-5`, path `/v1/messages`.
 
 OpenCode / Cline / Codex: set the provider `base_url` to `http://127.0.0.1:47821/v1`. Model prefixes select a profile (`openai/…`, `groq/…`, `anthropic/…`, `copilot/…`).
 
-Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns.
+Optional session key: `X-Enigmatic-Session` so placeholders stay stable across turns. The header is a capability for that vault: with the gate on it is namespaced by the bearer token, and with the gate off a missing header does not share a global map. Sessions expire after an hour and the process keeps a bounded number of them.
 
 ## Access token
 
@@ -94,7 +94,9 @@ OPENAI_API_KEY=sk-...
 client = OpenAI(base_url="http://127.0.0.1:47821/v1", api_key="sk-local-change-me")
 ```
 
-`api_key_env` in `conf/providers.yaml` selects the variable (default `ENIGMATIC_API_KEY`). A literal `api_key` in that file is used only when the variable is empty. Leave both empty to keep the proxy open on localhost. A missing token returns OpenAI's `invalid_request_error` shape with HTTP 401. `status` reports the gate as enabled or off and never prints the token. `/health` stays unauthenticated.
+`api_key_env` in `conf/providers.yaml` selects the variable (default `ENIGMATIC_API_KEY`). A literal `api_key` in that file is used only when the variable is empty. Leave both empty to keep the proxy open on localhost; `serve` prints a warning in that case, and refuses a non-loopback bind. A missing token returns OpenAI's `invalid_request_error` shape with HTTP 401. `status` reports the gate as enabled or off and never prints the token. `/health` stays unauthenticated.
+
+`.env` files do not apply `HTTP(S)_PROXY`, `ALL_PROXY`, or CA bundle variables. Set those in the process environment if you need them.
 
 The same env files supply upstream keys (`OPENAI_API_KEY` and the other `api_key_env` names).
 
@@ -107,7 +109,9 @@ npm i -g @github/copilot
 copilot   # complete login in the CLI
 ```
 
-Then call Enigmatic with `model: "copilot/gpt-5"` (or another model the CLI accepts). Enigmatic packs the anonymized transcript into ACP or `copilot -p`. There is no `enigmatic login copilot`.
+Then call Enigmatic with `model: "copilot/gpt-5"` (or another model the CLI accepts). Enigmatic packs the anonymized transcript into ACP or `copilot -p -` (the prompt is written to the CLI's stdin, not its argv). Agent profiles that cannot deny tools are rejected. ACP sessions start in an empty temp directory and at most two agent CLIs run at once. There is no `enigmatic login copilot`.
+
+Request bodies are capped at 8 MiB. Vision data URLs over 5 MiB are dropped. Presidio runs off the request event loop, and repeated strings in a session are analyzed once. Names and locations stay off unless you add `PERSON` or `LOCATION` to `enabled_entities`.
 
 ## Tests
 

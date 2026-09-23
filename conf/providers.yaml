@@ -119,3 +119,5 @@ jsonl:
       - "stream-json"
       - "--permission-mode"
       - "dontAsk"
+      - "--disallowedTools"
+      - "Bash,Edit,Write,Read,WebFetch,WebSearch"

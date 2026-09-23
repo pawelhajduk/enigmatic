@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import secrets
 from typing import Any
 
@@ -43,6 +44,22 @@ def _basic_token(credential: str) -> str | None:
 
 def tokens_equal(provided: str, expected: str) -> bool:
     return secrets.compare_digest(provided, expected)
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for localhost names and loopback IPs. `0.0.0.0` is not loopback."""
+    name = host.strip().lower()
+    if name in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def bind_requires_api_key(host: str, api_key: str | None) -> bool:
+    """Public binds must set an access token. Loopback may stay open."""
+    return not is_loopback_host(host) and not (api_key and api_key.strip())
 
 
 def openai_auth_error(*, provided: bool) -> dict[str, Any]:

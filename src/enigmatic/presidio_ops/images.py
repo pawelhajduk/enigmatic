@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import shutil
+import threading
 from typing import Any
 
 from enigmatic.presidio_ops.mapping import SessionMapping
@@ -15,6 +16,11 @@ logger = logging.getLogger("enigmatic.images")
 MISSING_TESSERACT = (
     "[image omitted: Tesseract is not installed; Enigmatic fail-closed on vision]"
 )
+IMAGE_TOO_LARGE = "[image omitted: larger than Enigmatic's image size cap]"
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_PIXELS = 20_000_000
+_ENGINE: Any = None
+_ENGINE_LOCK = threading.Lock()
 
 
 def tesseract_available() -> bool:
@@ -26,26 +32,43 @@ def tesseract_status() -> dict[str, Any]:
     return {"ok": path is not None, "path": path}
 
 
+def _image_engine() -> Any:
+    global _ENGINE
+    with _ENGINE_LOCK:
+        if _ENGINE is None:
+            from presidio_image_redactor import ImageAnalyzerEngine
+
+            _ENGINE = ImageAnalyzerEngine()
+        return _ENGINE
+
+
 def redact_data_url(data_url: str, mapping: SessionMapping) -> str:
-    """OCR + box overlay. On missing Tesseract or engine errors, drop the image."""
+    """OCR + box overlay. On missing Tesseract, oversize input, or engine errors, drop the image."""
     if not data_url.startswith("data:image"):
         return data_url
+    header, _, b64 = data_url.partition(",")
+    if not b64 or (len(b64) * 3) // 4 > MAX_IMAGE_BYTES:
+        return IMAGE_TOO_LARGE if b64 else MISSING_TESSERACT
     if not tesseract_available():
         return MISSING_TESSERACT
     try:
         from PIL import Image, ImageDraw, ImageFont
-        from presidio_image_redactor import ImageAnalyzerEngine
     except Exception as exc:
         logger.warning("image redactor unavailable: %s", exc)
         return MISSING_TESSERACT
 
     try:
-        header, _, b64 = data_url.partition(",")
-        if not b64:
-            return MISSING_TESSERACT
         raw = base64.b64decode(b64)
-        image = Image.open(io.BytesIO(raw)).convert("RGB")
-        engine = ImageAnalyzerEngine()
+        if len(raw) > MAX_IMAGE_BYTES:
+            return IMAGE_TOO_LARGE
+        Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+        try:
+            image = Image.open(io.BytesIO(raw))
+            image.load()
+        except Image.DecompressionBombError:
+            return IMAGE_TOO_LARGE
+        image = image.convert("RGB")
+        engine = _image_engine()
         results = engine.analyze(image)
         draw = ImageDraw.Draw(image)
         try:

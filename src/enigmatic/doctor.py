@@ -73,14 +73,20 @@ def format_status(config: EnigmaticConfig) -> str:
         f"  default profile  {report['default_profile']}",
         f"  auth gate        {report['auth']}",
         f"  client base_url  {report['base_url']}",
-        "",
-        "Pipeline",
-        f"  spaCy            {spacy_line}",
-        f"  Tesseract        {tess_line}",
-        f"  entities         {entities}",
-        "",
-        "HTTP profiles",
     ]
+    if report["auth"] != "enabled":
+        lines.append("  warning          auth gate is off; any local account can use this proxy")
+    lines.extend(
+        [
+            "",
+            "Pipeline",
+            f"  spaCy            {spacy_line}",
+            f"  Tesseract        {tess_line}",
+            f"  entities         {entities}",
+            "",
+            "HTTP profiles",
+        ]
+    )
     http = report["http_profiles"]
     if not http:
         lines.append("  (none)")
