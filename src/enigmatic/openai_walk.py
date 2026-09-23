@@ -13,6 +13,20 @@ JSONValue = str | int | float | bool | None | list[Any] | dict[str, Any]
 
 SKIP_KEY_NAMES = {"model", "encoding_format"}
 SCHEMA_KEYS = {"parameters", "input_schema", "json_schema", "schema"}
+SCHEMA_TEXT_KEYS = {"description", "example", "examples"}
+
+
+def _is_schema_text(path: tuple[str, ...]) -> bool:
+    return any(part in SCHEMA_TEXT_KEYS for part in path)
+
+
+def _skip_string(path: tuple[str, ...]) -> bool:
+    """Skip model ids and schema structure. Still scan descriptions and examples."""
+    if path and path[-1] in SKIP_KEY_NAMES:
+        return True
+    if _is_schema_text(path):
+        return False
+    return _is_schema_path(path)
 
 
 def _is_schema_path(path: tuple[str, ...]) -> bool:
@@ -38,9 +52,7 @@ def walk(
 ) -> JSONValue:
     """Anonymize every JSON string except model ids and tool/function schemas."""
     if isinstance(value, str):
-        if path and path[-1] in SKIP_KEY_NAMES:
-            return value
-        if _is_schema_path(path):
+        if _skip_string(path):
             return value
         if value.startswith("data:image"):
             return redact_data_url(value, mapping)
@@ -65,9 +77,7 @@ def collect_strings(value: JSONValue, path: tuple[str, ...] = ()) -> list[str]:
 
     def visit(node: JSONValue, node_path: tuple[str, ...]) -> None:
         if isinstance(node, str):
-            if node_path and node_path[-1] in SKIP_KEY_NAMES:
-                return
-            if _is_schema_path(node_path):
+            if _skip_string(node_path):
                 return
             found.append(node)
             return

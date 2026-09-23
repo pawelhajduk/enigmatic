@@ -6,12 +6,25 @@ import asyncio
 import json
 import logging
 import shutil
+import tempfile
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from enigmatic.config import AcpProfile
 
 logger = logging.getLogger("enigmatic.acp")
+
+AGENT_TIMEOUT_SECONDS = 120.0
+DEFAULT_DENY_TOOLS = (
+    "shell",
+    "bash",
+    "write",
+    "read",
+    "edit",
+    "url",
+    "memory",
+    "fetch",
+)
 
 DenyHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -22,6 +35,28 @@ def command_on_path(command: str) -> bool:
 
 def deny_permission(_request: dict[str, Any]) -> dict[str, Any]:
     return {"outcome": {"outcome": "cancelled"}}
+
+
+def acp_argv(profile: AcpProfile) -> list[str]:
+    """CLI argv with tool-deny flags. Permission requests are still cancelled in-process."""
+    tools = list(dict.fromkeys([*profile.deny_tools, *DEFAULT_DENY_TOOLS]))
+    argv = [profile.command, *profile.args]
+    for tool in tools:
+        argv.append(f"--deny-tool={tool}")
+        argv.append(f"--excluded-tools={tool}")
+    return argv
+
+
+async def _discard_stderr(stream: asyncio.StreamReader | None) -> None:
+    if stream is None:
+        return
+    try:
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                return
+    except Exception:
+        return
 
 
 class AcpError(RuntimeError):
@@ -36,17 +71,35 @@ async def run_acp_prompt(
 ) -> str:
     if not command_on_path(profile.command):
         raise AcpError(f"{profile.command} is not on PATH")
-    argv = [profile.command, *profile.args]
-    for tool in profile.deny_tools:
-        argv.append(f"--deny-tool={tool}")
-        argv.append(f"--excluded-tools={tool}")
+    argv = acp_argv(profile)
+    # Agents start in an empty directory so a tool that ignores the deny list
+    # is not already sitting in the user's project.
+    owned_dir: tempfile.TemporaryDirectory[str] | None = None
+    if cwd is None:
+        owned_dir = tempfile.TemporaryDirectory(prefix="enigmatic-agent-")
+        cwd = owned_dir.name
     try:
-        text = await _run_with_sdk(argv, prompt, model, cwd)
-        if text is not None:
-            return text
-    except Exception as exc:
-        logger.info("ACP SDK path failed, using raw JSON-RPC: %s", exc)
-    return await _run_raw_jsonrpc(argv, prompt, model, cwd)
+        try:
+            text = await asyncio.wait_for(
+                _run_with_sdk(argv, prompt, model, cwd),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+            if text is not None:
+                return text
+        except TimeoutError as exc:
+            raise AcpError(f"{profile.command} timed out") from exc
+        except Exception as exc:
+            logger.info("ACP SDK path failed, using raw JSON-RPC: %s", exc)
+        try:
+            return await asyncio.wait_for(
+                _run_raw_jsonrpc(argv, prompt, model, cwd),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            raise AcpError(f"{profile.command} timed out") from exc
+    finally:
+        if owned_dir is not None:
+            owned_dir.cleanup()
 
 
 async def _run_with_sdk(
@@ -111,6 +164,7 @@ async def _run_raw_jsonrpc(
     if proc.stdin is None or proc.stdout is None:
         raise AcpError("ACP process missing stdio")
 
+    discard = asyncio.create_task(_discard_stderr(proc.stderr))
     next_id = 0
     chunks: list[str] = []
 
@@ -150,7 +204,10 @@ async def _run_raw_jsonrpc(
                 return result
 
     try:
-        await rpc("initialize", {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "enigmatic"}})
+        await rpc(
+            "initialize",
+            {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "enigmatic"}},
+        )
         session = await rpc("session/new", {"cwd": cwd or ".", "mcpServers": []})
         session_id = session.get("sessionId") or session.get("session_id")
         if model:
@@ -163,6 +220,7 @@ async def _run_raw_jsonrpc(
             {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
         )
     finally:
+        discard.cancel()
         try:
             proc.stdin.close()
         except Exception:

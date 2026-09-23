@@ -27,7 +27,7 @@ class PlaceholderOperator(Operator):
         elif isinstance(session_id, str) and session_id:
             session_map = STORE.get(session_id)
         else:
-            session_map = STORE.get("default")
+            session_map = SessionMapping()
         return session_map.placeholder_for(entity_type, text)
 
     def validate(self, params: dict[str, object] | None = None) -> None:

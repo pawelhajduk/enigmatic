@@ -19,3 +19,7 @@ enabled_entities:
   - AWS_ACCESS_KEY
   - AWS_SECRET_KEY
   - PEM_KEY
+  - JWT
+  - SLACK_TOKEN
+  - STRIPE_KEY
+  - CONNECTION_STRING

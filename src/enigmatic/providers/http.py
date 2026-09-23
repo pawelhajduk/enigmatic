@@ -20,6 +20,10 @@ from enigmatic.restore import StreamRestorer
 
 logger = logging.getLogger("enigmatic.http")
 
+# Long read window for token streams. Connect stays short so a dead upstream fails fast.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+MAX_SSE_LINE_BYTES = 1024 * 1024
+
 
 class HttpProviderError(Exception):
     def __init__(self, status_code: int, body: bytes, headers: dict[str, str]) -> None:
@@ -77,7 +81,7 @@ class HttpProvider:
 
     async def _client_obj(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0))
+            self._client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
         return self._client
 
     async def request(
@@ -116,11 +120,23 @@ async def iter_sse_lines(response: httpx.Response) -> AsyncIterator[str]:
     buffer = ""
     async for raw in response.aiter_bytes():
         buffer += raw.decode("utf-8", errors="replace")
+        if len(buffer) > MAX_SSE_LINE_BYTES and "\n" not in buffer:
+            raise HttpProviderError(502, b"upstream SSE line too large", {})
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
+            if len(line) > MAX_SSE_LINE_BYTES:
+                raise HttpProviderError(502, b"upstream SSE line too large", {})
             yield line
+    if len(buffer) > MAX_SSE_LINE_BYTES:
+        raise HttpProviderError(502, b"upstream SSE line too large", {})
     if buffer:
         yield buffer
+
+
+async def close_response(response: httpx.Response) -> None:
+    close = getattr(response, "aclose", None)
+    if close is not None:
+        await close()
 
 
 _STREAM_TEXT_KEYS = {"content", "text", "arguments"}
@@ -163,23 +179,26 @@ async def restored_sse(
 ) -> AsyncIterator[bytes]:
     restorer = StreamRestorer(mapping)
     event_prefix = ""
-    async for line in iter_sse_lines(response):
-        if line.startswith("event:"):
-            event_prefix = line if line.endswith("\n") else line + "\n"
-            continue
-        if line.startswith("data:"):
-            out = restore_sse_data_line(line, restorer)
-            if event_prefix:
-                yield (event_prefix + out).encode("utf-8")
-                event_prefix = ""
-            else:
-                yield out.encode("utf-8")
-            continue
-        if not line.strip():
-            continue
-    leftover = restorer.flush()
-    if leftover:
-        yield f"data: {json.dumps(leftover, ensure_ascii=False)}\n\n".encode()
+    try:
+        async for line in iter_sse_lines(response):
+            if line.startswith("event:"):
+                event_prefix = line if line.endswith("\n") else line + "\n"
+                continue
+            if line.startswith("data:"):
+                out = restore_sse_data_line(line, restorer)
+                if event_prefix:
+                    yield (event_prefix + out).encode("utf-8")
+                    event_prefix = ""
+                else:
+                    yield out.encode("utf-8")
+                continue
+            if not line.strip():
+                continue
+        leftover = restorer.flush()
+        if leftover:
+            yield f"data: {json.dumps(leftover, ensure_ascii=False)}\n\n".encode()
+    finally:
+        await close_response(response)
 
 
 async def translate_and_restore_openai_to_anthropic(
@@ -190,11 +209,14 @@ async def translate_and_restore_openai_to_anthropic(
     restorer = StreamRestorer(mapping)
 
     async def restored_lines() -> AsyncIterator[str]:
-        async for line in iter_sse_lines(response):
-            if line.startswith("data:"):
-                yield restore_sse_data_line(line, restorer).rstrip("\n")
-            else:
-                yield line
+        try:
+            async for line in iter_sse_lines(response):
+                if line.startswith("data:"):
+                    yield restore_sse_data_line(line, restorer).rstrip("\n")
+                else:
+                    yield line
+        finally:
+            await close_response(response)
 
     async for chunk in map_openai_sse_to_anthropic(restored_lines(), model):
         yield chunk
@@ -208,11 +230,14 @@ async def translate_and_restore_anthropic_to_openai(
     restorer = StreamRestorer(mapping)
 
     async def restored_lines() -> AsyncIterator[str]:
-        async for line in iter_sse_lines(response):
-            if line.startswith("data:"):
-                yield restore_sse_data_line(line, restorer).rstrip("\n")
-            else:
-                yield line
+        try:
+            async for line in iter_sse_lines(response):
+                if line.startswith("data:"):
+                    yield restore_sse_data_line(line, restorer).rstrip("\n")
+                else:
+                    yield line
+        finally:
+            await close_response(response)
 
     async for chunk in map_anthropic_sse_to_openai(restored_lines(), model):
         yield chunk
