@@ -47,7 +47,7 @@ def collect_doctor(config: EnigmaticConfig) -> dict[str, Any]:
         "version": __version__,
         "listen": f"{config.listen_host}:{config.listen_port}",
         "default_profile": config.default_profile,
-        "auth": "enabled" if config.api_key else "off",
+        "auth": "enabled" if config.resolved_api_key else "off",
         "entities": list(config.enabled_entities),
         "base_url": f"http://{config.listen_host}:{config.listen_port}/v1",
         "spacy": spacy_status(),
