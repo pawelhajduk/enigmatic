@@ -33,6 +33,9 @@ class AcpProfile(BaseModel):
     command: str
     args: list[str] = Field(default_factory=list)
     deny_tools: list[str] = Field(default_factory=list)
+    # Per-tool flag templates (`{tool}` is replaced). None uses the Copilot-style
+    # defaults; [] for CLIs that reject unknown flags, such as Cursor's `agent`.
+    deny_flags: list[str] | None = None
     # Uses the CLI's own login (for example cursor_login). Not an API key.
     auth_method: str | None = None
 

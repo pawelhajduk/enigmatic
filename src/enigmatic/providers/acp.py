@@ -37,6 +37,7 @@ DEFAULT_DENY_TOOLS = (
     "memory",
     "fetch",
 )
+DEFAULT_DENY_FLAGS = ("--deny-tool={tool}", "--excluded-tools={tool}")
 
 
 def command_on_path(command: str) -> bool:
@@ -49,11 +50,11 @@ def deny_permission(_request: dict[str, Any]) -> dict[str, Any]:
 
 def acp_argv(profile: AcpProfile) -> list[str]:
     """CLI argv with tool-deny flags. Permission requests are still cancelled in-process."""
+    templates = DEFAULT_DENY_FLAGS if profile.deny_flags is None else profile.deny_flags
     tools = list(dict.fromkeys([*profile.deny_tools, *DEFAULT_DENY_TOOLS]))
     argv = [profile.command, *profile.args]
     for tool in tools:
-        argv.append(f"--deny-tool={tool}")
-        argv.append(f"--excluded-tools={tool}")
+        argv.extend(template.replace("{tool}", tool) for template in templates)
     return argv
 
 

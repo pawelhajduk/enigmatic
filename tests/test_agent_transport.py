@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from enigmatic.config import AcpProfile, EnigmaticConfig, HttpProfile, JsonlProfile, load_config
 from enigmatic.presidio_ops.mapping import SessionMapping
-from enigmatic.providers.acp import AcpError, run_acp_prompt
+from enigmatic.providers.acp import AcpError, acp_argv, run_acp_prompt
 from enigmatic.providers.invoke import run_layered_prompt
-from enigmatic.providers.jsonl import build_jsonl_argv, parse_codex_jsonl, run_jsonl_prompt
+from enigmatic.providers.jsonl import (
+    build_jsonl_argv,
+    jsonl_denies_tools,
+    parse_codex_jsonl,
+    run_jsonl_prompt,
+)
 from enigmatic.providers.router import Router
 from enigmatic.server import create_app
 
@@ -352,10 +359,60 @@ def test_codex_argv_is_the_existing_exec_cli() -> None:
     assert "do not put this on argv" not in argv
 
 
+def test_codex_read_only_sandbox_alone_does_not_count_as_denying_tools() -> None:
+    read_only = ["exec", "--json", "--sandbox", "read-only", "-"]
+    assert not jsonl_denies_tools(JsonlProfile(command="codex", extra_args=read_only))
+    flags = [*read_only[:-1], "--disable", "shell_tool", "--disable=unified_exec", "-"]
+    assert jsonl_denies_tools(JsonlProfile(command="codex", extra_args=flags))
+    via_config = [*read_only[:-1], "-c", "features.shell_tool=false", "-c", "features.unified_exec=false", "-"]
+    assert jsonl_denies_tools(JsonlProfile(command="codex", extra_args=via_config))
+    shell_only = [*read_only[:-1], "--disable", "shell_tool", "-"]
+    assert not jsonl_denies_tools(JsonlProfile(command="codex", extra_args=shell_only))
+    assert jsonl_denies_tools(load_config().jsonl["codex"])
+    assert "--ignore-user-config" in load_config().jsonl["codex"].extra_args
+
+
+@pytest.mark.asyncio
+async def test_prompt_mode_cli_runs_in_an_empty_temp_directory(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
+            captured["listing"] = os.listdir(captured["cwd"])
+            return b'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n', b""
+
+    async def fake_exec(*argv: str, cwd: str | None = None, **kwargs: object) -> FakeProc:
+        captured["cwd"] = cwd
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr("enigmatic.providers.jsonl.command_on_path", lambda _cmd: True)
+    profile = JsonlProfile(command="claude", parser="codex", extra_args=["--disallowedTools", "Bash"])
+    assert await run_jsonl_prompt(profile, "hi") == "ok"
+    assert captured["cwd"] and os.path.abspath(captured["cwd"]) != os.path.abspath(os.getcwd())
+    assert captured["listing"] == []
+    assert not os.path.exists(captured["cwd"])
+
+
+def test_acp_deny_flags_are_per_profile() -> None:
+    cfg = load_config()
+    cursor = acp_argv(cfg.acp["cursor"])
+    # `agent acp` exits on unknown options such as --deny-tool.
+    assert not any(arg.startswith(("--deny-tool", "--excluded-tools")) for arg in cursor)
+    assert cursor == ["agent", "--mode", "ask", "--sandbox", "enabled", "acp"]
+    copilot = acp_argv(cfg.acp["copilot"])
+    assert "--deny-tool=shell" in copilot and "--excluded-tools=shell" in copilot
+    custom = acp_argv(AcpProfile(command="x", deny_tools=["shell"], deny_flags=["--block={tool}"]))
+    assert "--block=shell" in custom and "--deny-tool=shell" not in custom
+
+
 def test_bundled_registry_calls_installed_clis() -> None:
     cfg = load_config()
     assert cfg.acp["cursor"].command == "agent"
-    assert cfg.acp["cursor"].args == ["acp"]
+    assert cfg.acp["cursor"].args[-1] == "acp"
+    assert cfg.acp["cursor"].args[:2] == ["--mode", "ask"]
     assert cfg.acp["cursor"].auth_method == "cursor_login"
     assert cfg.jsonl["codex"].command == "codex"
     assert cfg.jsonl["codex"].parser == "codex"

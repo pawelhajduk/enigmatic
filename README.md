@@ -28,7 +28,7 @@ Client headers `OpenAI-Beta`, `OpenAI-Organization`, `OpenAI-Project`, `Idempote
 
 **Outbound agent CLIs:** Enigmatic does not implement a coding agent. It anonymizes the prompt, then calls a CLI that is already installed and logged in, then restores placeholders in the reply. Two transports:
 
-- [ACP](https://agentclientprotocol.com/) over stdio (JSON-RPC). Cursor is `agent acp` with `cursor_login`. Copilot is `copilot --acp --stdio`, with a `copilot -p` fallback. Gemini, Kimi, Hermes, Kiro, Qoder, Trae, QwenPaw, and Grok are further registry rows in `conf/providers.yaml`.
+- [ACP](https://agentclientprotocol.com/) over stdio (JSON-RPC). Cursor is `agent --mode ask --sandbox enabled acp` with `cursor_login`. `agent` rejects unknown flags, so the profile sets `deny_flags: []` and relies on Cursor's read-only ask mode instead of `--deny-tool`. Copilot is `copilot --acp --stdio`, with a `copilot -p` fallback. Gemini, Kimi, Hermes, Kiro, Qoder, Trae, QwenPaw, and Grok are further registry rows in `conf/providers.yaml`.
 - Prompt mode of the same binaries: `claude -p`, `codex exec --json` (stdin prompt, read-only sandbox), and Copilot's JSON output.
 
 Tool, filesystem, and terminal requests are denied, so a chat completion cannot write your disk. These profiles do not need an upstream API key; they use the CLI's own login. VS Code Copilot and Copilot CLI are **not** Enigmatic clients; do not set `COPILOT_PROVIDER_BASE_URL` to this proxy.
@@ -133,7 +133,9 @@ claude
 codex login
 ```
 
-From an OpenAI-compatible client, set the model prefix to the profile: `cursor/default`, `copilot/gpt-5`, `claude/default`, or `codex/gpt-5.4`. Enigmatic packs the anonymized transcript into ACP or the CLI's prompt mode. The prompt is written to the CLI's stdin, not its argv. Agent profiles that cannot deny tools are rejected. ACP sessions start in an empty temp directory and at most two agent CLIs run at once.
+From an OpenAI-compatible client, set the model prefix to the profile: `cursor/default`, `copilot/gpt-5`, `claude/default`, or `codex/gpt-5.4`. Enigmatic packs the anonymized transcript into ACP or the CLI's prompt mode. The prompt is written to the CLI's stdin, not its argv. Agent profiles that cannot deny tools are rejected. ACP sessions and prompt-mode CLIs start in an empty temp directory, and at most two agent CLIs run at once.
+
+Codex's `--sandbox read-only` blocks writes but still lets the model run read-only shell commands. A read-only shell could read local files and send them upstream without anonymization, so the Codex profile only counts as tool-denying when `shell_tool` and `unified_exec` are also disabled. The bundled profile also disables image viewing, browser, computer-use, apps, plugins, image generation, and sub-agents. It passes `--ignore-user-config`, so MCP servers from `~/.codex/config.toml` are not loaded; `codex login` credentials still apply.
 
 Or call the layer directly. This anonymizes the text, runs the installed CLI, and prints the restored reply:
 

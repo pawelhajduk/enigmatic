@@ -97,9 +97,12 @@ acp:
     command: grok
     args: ["agent", "stdio"]
   # Cursor CLI. Log in with `agent login`. Enigmatic does not ship an agent.
+  # `agent` rejects unknown flags such as --deny-tool, so it runs in its
+  # read-only ask mode with the sandbox on; permission requests are cancelled.
   cursor:
     command: agent
-    args: ["acp"]
+    args: ["--mode", "ask", "--sandbox", "enabled", "acp"]
+    deny_flags: []
     auth_method: cursor_login
 
 jsonl:
@@ -134,6 +137,9 @@ jsonl:
     prompt_stdin: true
     parser: codex
     model_flag: "-m"
+    # A read-only sandbox still allows shell reads, so shell, file-viewing, browser,
+    # and plugin tools are disabled too. --ignore-user-config drops user MCP servers
+    # but keeps the `codex login` credentials.
     extra_args:
       - exec
       - --json
@@ -141,4 +147,27 @@ jsonl:
       - read-only
       - --skip-git-repo-check
       - --ephemeral
+      - --ignore-user-config
+      - --disable
+      - shell_tool
+      - --disable
+      - unified_exec
+      - --disable
+      - view_image
+      - --disable
+      - browser_use
+      - --disable
+      - browser_use_external
+      - --disable
+      - in_app_browser
+      - --disable
+      - computer_use
+      - --disable
+      - apps
+      - --disable
+      - plugins
+      - --disable
+      - image_generation
+      - --disable
+      - multi_agent
       - "-"

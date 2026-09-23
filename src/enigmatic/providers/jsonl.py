@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import shutil
+import tempfile
 from typing import Any
 
 from enigmatic.config import JsonlProfile
@@ -14,6 +15,7 @@ logger = logging.getLogger("enigmatic.jsonl")
 
 AGENT_TIMEOUT_SECONDS = 120.0
 _DENY_MARKERS = ("--deny-tool", "--disallowedtools", "--disallowed-tools", "dontask")
+CODEX_SHELL_FEATURES = frozenset({"shell_tool", "unified_exec"})
 
 
 class JsonlError(RuntimeError):
@@ -24,13 +26,32 @@ def command_on_path(command: str) -> bool:
     return shutil.which(command) is not None
 
 
+def _codex_disabled_features(args: list[str]) -> set[str]:
+    """Features turned off via `--disable X`, `--disable=X`, or `-c features.X=false`."""
+    disabled: set[str] = set()
+    for index, arg in enumerate(args):
+        value = arg
+        if arg in {"--disable", "-c", "--config"} and index + 1 < len(args):
+            value = f"{arg}={args[index + 1]}"
+        if value.startswith("--disable="):
+            disabled.add(value.split("=", 1)[1].strip().lower())
+        elif value.startswith(("-c=", "--config=")):
+            setting = value.split("=", 1)[1].replace(" ", "").lower()
+            if setting.startswith("features.") and setting.endswith("=false"):
+                disabled.add(setting[len("features.") : -len("=false")])
+    return disabled
+
+
 def jsonl_denies_tools(profile: JsonlProfile) -> bool:
     """True when the CLI args tell the agent to refuse tool use."""
     blob = " ".join(profile.extra_args).lower()
     if any(marker in blob for marker in _DENY_MARKERS):
         return True
-    # Codex exec refuses writes with an explicit read-only sandbox.
-    return "--sandbox" in blob and "read-only" in blob
+    # Codex exec: a read-only sandbox still lets the model run read-only shell
+    # commands, which could send unanonymized local files upstream. Both shell
+    # tools must be off as well.
+    read_only = "--sandbox" in blob and "read-only" in blob
+    return read_only and CODEX_SHELL_FEATURES <= _codex_disabled_features(profile.extra_args)
 
 
 def parse_copilot_jsonl(line: str) -> str | None:
@@ -155,21 +176,25 @@ async def run_jsonl_prompt(
     # `-` means "read the prompt from stdin" so the text is not visible in process listings.
     argv = build_jsonl_argv(profile, prompt, usable_model)
     logger.info("jsonl spawn %s", profile.command)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(prompt.encode("utf-8")),
-            timeout=AGENT_TIMEOUT_SECONDS,
+    # Same isolation as ACP: the agent starts in an empty directory, not the
+    # project the proxy was launched from.
+    with tempfile.TemporaryDirectory(prefix="enigmatic-agent-") as workdir:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workdir,
         )
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise JsonlError(f"{profile.command} timed out") from None
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode("utf-8")),
+                timeout=AGENT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise JsonlError(f"{profile.command} timed out") from None
     if proc.returncode not in (0, None) and not stdout:
         err = stderr.decode("utf-8", errors="replace")
         raise JsonlError(err.strip() or f"{profile.command} exited {proc.returncode}")
