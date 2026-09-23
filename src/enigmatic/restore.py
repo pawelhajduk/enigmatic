@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import re
 
-from enigmatic.presidio_ops.mapping import SessionMapping
+from enigmatic.presidio_ops.mapping import SessionMapping, json_escape
 
 _INCOMPLETE_RE = re.compile(r"<[A-Z0-9_]*$")
 
 
 class StreamRestorer:
-    """Hold back partial `<EMAIL_1>` tokens that were split across SSE chunks."""
+    """Hold back partial `<EMAIL_1>` tokens that were split across SSE chunks.
 
-    def __init__(self, mapping: SessionMapping) -> None:
+    Use one restorer per logical text stream (one choice field, one tool call's
+    arguments, one Responses output item). With `escape_json`, originals are
+    written as JSON string content because the stream is JSON text.
+    """
+
+    def __init__(self, mapping: SessionMapping, *, escape_json: bool = False) -> None:
         self._mapping = mapping
+        self._escape_json = escape_json
         self._buf = ""
         self._version = -1
         self._pattern: re.Pattern[str] | None = None
@@ -24,7 +30,10 @@ class StreamRestorer:
         if version == self._version:
             return
         items = self._mapping.reverse_items()
-        self._lookup = dict(items)
+        if self._escape_json:
+            self._lookup = {token: json_escape(value) for token, value in items}
+        else:
+            self._lookup = dict(items)
         if items:
             # Longest token is first, and Python uses the leftmost alternative.
             self._pattern = re.compile("|".join(re.escape(token) for token, _value in items))
@@ -39,6 +48,10 @@ class StreamRestorer:
         if self._pattern is None:
             return text
         return self._pattern.sub(lambda match: self._lookup.get(match.group(0), match.group(0)), text)
+
+    @property
+    def pending(self) -> bool:
+        return bool(self._buf)
 
     def feed(self, chunk: str) -> str:
         self._buf += chunk
@@ -55,4 +68,4 @@ class StreamRestorer:
     def flush(self) -> str:
         leftover = self._buf
         self._buf = ""
-        return self._mapping.restore_complete(leftover)
+        return self._mapping.restore_complete(leftover, escape_json=self._escape_json)
