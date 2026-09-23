@@ -49,7 +49,8 @@ def secret_recognizers() -> list[PatternRecognizer]:
                     "pem_block",
                     r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"
                     r"[\s\S]{0,16000}?"
-                    r"(?:-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----|$)",
+                    # \Z, not $: Presidio compiles with re.MULTILINE, where $ ends the BEGIN line.
+                    r"(?:-----END (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----|\Z)",
                     0.95,
                 )
             ],
