@@ -229,6 +229,15 @@ def test_pem_pattern_covers_the_key_body() -> None:
     assert "SECRETKEYMATERIAL" in matched
 
 
+def test_pem_recognizer_covers_the_key_body_with_presidio_flags() -> None:
+    pem = next(rec for rec in secret_recognizers() if "PEM_KEY" in rec.supported_entities)
+    key = "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END PRIVATE KEY-----"
+    for text in (f"key:\n{key}\nthanks", "key:\n-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL\nmore"):
+        results = pem.analyze(text, ["PEM_KEY"])
+        assert results, text
+        assert "SECRETKEYMATERIAL" in text[results[0].start : results[0].end]
+
+
 def test_extra_secret_patterns_match() -> None:
     by_entity = {rec.supported_entities[0]: rec for rec in secret_recognizers()}
     samples = {
