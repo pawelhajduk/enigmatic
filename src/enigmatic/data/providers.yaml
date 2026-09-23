@@ -96,6 +96,11 @@ acp:
   grok:
     command: grok
     args: ["agent", "stdio"]
+  # Cursor CLI. Log in with `agent login`. Enigmatic does not ship an agent.
+  cursor:
+    command: agent
+    args: ["acp"]
+    auth_method: cursor_login
 
 jsonl:
   copilot:
@@ -114,8 +119,24 @@ jsonl:
   claude:
     command: claude
     prompt_flag: "-p"
+    parser: claude
     extra_args:
       - "--output-format"
       - "stream-json"
       - "--permission-mode"
       - "dontAsk"
+  # Codex CLI. Uses `codex login` (or CODEX_API_KEY). Default sandbox is read-only.
+  codex:
+    command: codex
+    prompt_flag: ""
+    prompt_stdin: true
+    parser: codex
+    model_flag: "-m"
+    extra_args:
+      - exec
+      - --json
+      - --sandbox
+      - read-only
+      - --skip-git-repo-check
+      - --ephemeral
+      - "-"

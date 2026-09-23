@@ -34,7 +34,6 @@ from enigmatic.protocols.translate import (
     responses_input_to_messages,
     responses_output_from_text,
 )
-from enigmatic.providers.acp import run_acp_prompt
 from enigmatic.providers.http import (
     HttpProvider,
     HttpProviderError,
@@ -42,7 +41,7 @@ from enigmatic.providers.http import (
     translate_and_restore_anthropic_to_openai,
     translate_and_restore_openai_to_anthropic,
 )
-from enigmatic.providers.jsonl import run_jsonl_prompt
+from enigmatic.providers.invoke import invoke_agent
 from enigmatic.providers.router import Route, Router
 
 logger = logging.getLogger("enigmatic.server")
@@ -252,18 +251,7 @@ def create_app(
         return JSONResponse(openai_completion_from_text(text, model))
 
     async def _run_agent(route: Route, prompt: str, mapping: SessionMapping) -> str:
-        if route.kind == "acp" and route.acp is not None:
-            try:
-                text = await run_acp_prompt(route.acp, prompt, model=route.model or None)
-                return mapping.restore_complete(text)
-            except Exception as exc:
-                logger.info("ACP failed, JSONL fallback: %s", exc)
-                if route.jsonl is None:
-                    raise
-        if route.jsonl is None:
-            raise RuntimeError(f"No JSONL profile for {route.profile_id}")
-        parser = "claude" if route.profile_id == "claude" else "copilot"
-        text = await run_jsonl_prompt(route.jsonl, prompt, model=route.model or None, parser=parser)
+        text = await invoke_agent(route, prompt)
         return mapping.restore_complete(text)
 
     async def _http_openai_result(
