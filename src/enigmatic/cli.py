@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -14,13 +15,8 @@ from enigmatic.config import load_config
 from enigmatic.doctor import collect_doctor, format_status
 from enigmatic.dry_run import anonymize_json_preview, anonymize_preview, format_preview
 from enigmatic.presidio_ops.pipeline import build_pipeline
+from enigmatic.providers.invoke import run_layered_prompt
 from enigmatic.server import create_app
-
-app = typer.Typer(
-    add_completion=False,
-    no_args_is_help=True,
-    help="Enigmatic anonymizes prompts locally before they reach an LLM or agent CLI.",
-)
 
 app = typer.Typer(
     add_completion=False,
@@ -126,4 +122,36 @@ def dry_run(
     else:
         result = anonymize_preview(pipeline, raw)
     typer.echo(format_preview(result), nl=False)
+
+
+@app.command()
+def prompt(
+    model: str = typer.Argument(
+        ...,
+        help="Installed agent, for example cursor/default, copilot/gpt-5, claude/default, or codex/gpt-5.4.",
+    ),
+    text: list[str] | None = typer.Argument(
+        default=None,
+        help="Prompt text. Omit to read --file or stdin.",
+    ),
+    file: Path | None = typer.Option(None, "--file", "-f", help="Read the prompt from a file."),
+    config: Path | None = typer.Option(None, "--config", "-c"),
+) -> None:
+    """Anonymize text and send it to an installed agent CLI over ACP or prompt mode.
+
+    Enigmatic does not implement the agent. It calls the CLI already on PATH
+    (agent acp, copilot, claude -p, codex exec) using that CLI's own login.
+    """
+    raw = _read_prompt(text, file)
+    if raw.strip() == "":
+        typer.echo("prompt is empty", err=True)
+        raise typer.Exit(code=2)
+    cfg = load_config(config)
+    pipeline = build_pipeline(cfg)
+    try:
+        reply = asyncio.run(run_layered_prompt(cfg, pipeline, model, raw))
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(reply)
 

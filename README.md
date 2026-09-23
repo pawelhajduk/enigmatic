@@ -26,7 +26,12 @@ Client headers `OpenAI-Beta`, `OpenAI-Organization`, `OpenAI-Project`, `Idempote
 
 **Outbound HTTP:** one generic OpenAI-compatible client plus native Anthropic. Named profiles cover OpenAI, Azure, Groq, OpenRouter, Together, Fireworks, DeepSeek, Mistral, Google’s OpenAI-compat endpoint, Ollama, LM Studio, and vLLM. Unknown JSON keys are preserved.
 
-**Outbound agent CLIs:** a shared [ACP](https://agentclientprotocol.com/) client (JSON-RPC over stdio) plus prompt-mode JSONL. Copilot uses `copilot --acp --stdio` with a `copilot -p --output-format json` fallback. Other ACP binaries (Gemini, Kimi, Hermes, Kiro, Qoder, Trae, QwenPaw, Grok) are registry rows in `conf/providers.yaml`. Enigmatic denies CLI tools so a chat completion cannot write your disk. VS Code Copilot and Copilot CLI are **not** Enigmatic clients; do not set `COPILOT_PROVIDER_BASE_URL` to this proxy.
+**Outbound agent CLIs:** Enigmatic does not implement a coding agent. It anonymizes the prompt, then calls a CLI that is already installed and logged in, then restores placeholders in the reply. Two transports:
+
+- [ACP](https://agentclientprotocol.com/) over stdio (JSON-RPC). Cursor is `agent acp` with `cursor_login`. Copilot is `copilot --acp --stdio`, with a `copilot -p` fallback. Gemini, Kimi, Hermes, Kiro, Qoder, Trae, QwenPaw, and Grok are further registry rows in `conf/providers.yaml`.
+- Prompt mode of the same binaries: `claude -p`, `codex exec --json` (stdin prompt, read-only sandbox), and Copilot's JSON output.
+
+Tool, filesystem, and terminal requests are denied, so a chat completion cannot write your disk. These profiles do not need an upstream API key; they use the CLI's own login. VS Code Copilot and Copilot CLI are **not** Enigmatic clients; do not set `COPILOT_PROVIDER_BASE_URL` to this proxy.
 
 Audio, image generation, files, batches, fine-tuning, and conversations return **501**. Embeddings on agent-CLI upstreams also return 501. Vision data URLs are OCR-redacted when Tesseract is installed. Otherwise the image part is replaced with a text part saying it was omitted (fail-closed). Remote image URLs are forwarded as-is.
 
@@ -114,16 +119,30 @@ client = OpenAI(base_url="http://127.0.0.1:47821/v1", api_key="sk-local-change-m
 
 The same env files supply upstream keys (`OPENAI_API_KEY` and the other `api_key_env` names).
 
-## Copilot CLI
+## Installed coding agents
 
-Install and log in yourself:
+Log in with the agent's own CLI. There is no `enigmatic login`.
 
 ```bash
-npm i -g @github/copilot
-copilot   # complete login in the CLI
+# Cursor
+agent login
+# Copilot
+npm i -g @github/copilot && copilot
+# Claude Code and Codex use their own login as well
+claude
+codex login
 ```
 
-Then call Enigmatic with `model: "copilot/gpt-5"` (or another model the CLI accepts). Enigmatic packs the anonymized transcript into ACP or `copilot -p -` (the prompt is written to the CLI's stdin, not its argv). Agent profiles that cannot deny tools are rejected. ACP sessions start in an empty temp directory and at most two agent CLIs run at once. There is no `enigmatic login copilot`.
+From an OpenAI-compatible client, set the model prefix to the profile: `cursor/default`, `copilot/gpt-5`, `claude/default`, or `codex/gpt-5.4`. Enigmatic packs the anonymized transcript into ACP or the CLI's prompt mode. The prompt is written to the CLI's stdin, not its argv. Agent profiles that cannot deny tools are rejected. ACP sessions start in an empty temp directory and at most two agent CLIs run at once.
+
+Or call the layer directly. This anonymizes the text, runs the installed CLI, and prints the restored reply:
+
+```bash
+uv run enigmatic prompt cursor/default "email me at ada@example.com"
+uv run enigmatic prompt codex/gpt-5.4 --file prompt.txt
+```
+
+`prompt` refuses HTTP profiles such as `openai/gpt-4o`. Those still go through `enigmatic serve` and the provider API key.
 
 Request bodies are capped at 32 MiB (`max_body_bytes` in `conf/providers.yaml`). Upstream reads time out after 600 s without data, matching the OpenAI SDK; set `read_timeout` on an HTTP profile to change it. Vision data URLs over 5 MiB are dropped. Presidio runs off the request event loop, and repeated strings in a session are analyzed once. Names and locations stay off unless you add `PERSON` or `LOCATION` to `enabled_entities`.
 
